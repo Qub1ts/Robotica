@@ -1,22 +1,24 @@
 from pyrobot.brain import Brain
-
 import cv2
 from pyrobot.tools.followLineTools import findLineDeviation
 
 class BrainFollowLine(Brain):
+ 
+  NO_FORWARD = 0
+  SLOW_FORWARD = 0.1
+  MED_FORWARD = 0.5
+  FULL_FORWARD = 1.0
 
-  # Constantes de control
-  Kp = 1.0          # Ganancia proporcional para el giro
-  FORWARD_VEL = 0.5 # Velocidad base hacia adelante
+  NO_TURN = 0
+  MED_LEFT = 0.5
+  HARD_LEFT = 1.0
+  MED_RIGHT = -0.5
+  HARD_RIGHT = -1.0
 
-  # Umbral de distancia para detectar obstáculo (en metros)
-  OBSTACLE_THRESHOLD = 0.4
-
-  # Cuántos pasos girar para esquivar el obstáculo
-  AVOID_STEPS = 15
+  NO_ERROR = 0
 
   def setup(self):
-    self.avoidCounter = 0  # Contador para esquivar el obstáculo
+    pass
 
   def destroy(self):
     cv2.destroyAllWindows()
@@ -24,47 +26,35 @@ class BrainFollowLine(Brain):
   def step(self):
     cv_image = self.robot.getImage()
 
-    # Mostrar imagen de la cámara
+    # Mostrar la imagen de la cámara (ideal para tus capturas de pantalla del reporte)
     cv2.imshow("Stage Camera Image", cv_image)
     cv2.waitKey(1)
 
-    # --- DETECCIÓN DE OBSTÁCULO ---
-    # Leer todos los sensores de rango y quedarse con el mínimo frontal
-    numSensors = len(self.robot.range)
-    minFront = float('inf')
-    for i in range(numSensors):
-      dist = self.robot.range[i].distance()
-      if dist < minFront:
-        minFront = dist
-
-    # Si estamos en modo evasión, seguir girando unos pasos
-    if self.avoidCounter > 0:
-      self.avoidCounter -= 1
-      self.move(self.FORWARD_VEL, 0.8)  # Gira a la izquierda mientras avanza
-      return
-
-    # Si hay un obstáculo cerca, activar la evasión
-    if minFront < self.OBSTACLE_THRESHOLD:
-      self.avoidCounter = self.AVOID_STEPS
-      self.move(0.0, 0.8)  # Para y gira
-      return
-
-    # --- SEGUIMIENTO DE LÍNEA (Controlador Proporcional) ---
+    # Convertir a escala de grises y buscar la línea
     imageGray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
     foundLine, error = findLineDeviation(imageGray)
 
-    if foundLine:
-      # Turn velocity proporcional al error (negativo porque error>0 → girar derecha)
-      turn_vel = -self.Kp * error
+    # 1. EVASIÓN DE OBSTÁCULOS
+    # Leemos los sonares frontales (índices 2, 3, 4 y 5 del anillo de 8 sensores)
+    front_distances = [self.robot.range[i].distance() for i in range(2, 6)]
+    min_front_dist = min(front_distances)
 
-      # Forward velocity: reducir velocidad cuanto más hay que girar
-      forward_vel = max(0.1, self.FORWARD_VEL - abs(turn_vel) * 0.5)
-
-      self.move(forward_vel, turn_vel)
+    if min_front_dist < 0.4:
+      # Si hay un obstáculo muy cerca (a menos de 0.4m), giramos a la izquierda para rodearlo
+      self.move(self.MED_FORWARD, self.HARD_LEFT)
+      
+    elif not foundLine:
+      # Si perdemos la línea (por ejemplo, al esquivar el obstáculo), 
+      # giramos suavemente hacia la derecha para intentar reencontrarla
+      self.move(self.MED_FORWARD, self.MED_RIGHT)
+      
     else:
-      # Si pierde la línea, gira lentamente para buscarla
-      self.move(0.0, 0.3)
-
+      # 2. SEGUIMIENTO DE LÍNEA (Controlador Proporcional)
+      # Fórmulas extraídas de las diapositivas de clase
+      tv = -1.0 * error
+      fv = max(0.2, 1.0 - abs(tv * 1.5)) # Si el giro es brusco, el robot frena un poco
+      
+      self.move(fv, tv)
 
 def INIT(engine):
   assert (engine.robot.requires("range-sensor") and
