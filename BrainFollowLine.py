@@ -25,6 +25,7 @@ class BrainFollowLine(Brain):
     self.avoiding = False   # Obstáculo activo enfrente
     self.post_avoid = False # Esquivamos un obstáculo, buscando la línea
     self.last_error = 0.0   # último error conocido de la línea
+    self.post_avoid_frames = 0
 
   def destroy(self):
     cv2.destroyAllWindows()
@@ -41,9 +42,9 @@ class BrainFollowLine(Brain):
     imageGray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
     foundLine, error = findLineDeviation(imageGray)
 
-    front_distances = [self.robot.range[i].distance() for i in range(2, 6)]
+    front_distances = [self.robot.range[i].distance() for i in range(1, 7)]
     min_front_dist = min(front_distances)
-    obstacle_detected = min_front_dist < 0.4
+    obstacle_detected = min_front_dist < 0.7
 
     # ── 1. OBSTÁCULO ACTIVO ───────────────────────────────────────────────────
     if obstacle_detected:
@@ -57,6 +58,8 @@ class BrainFollowLine(Brain):
     if self.avoiding:
       self.avoiding = False
       self.post_avoid = True
+      self.post_avoid_frames = 0  # Contador para controlar el giro de retorno
+
 
     # ── 3. MODO BÚSQUEDA POST-EVASIÓN ─────────────────────────────────────────
     # Suponemos que la línea SIEMPRE reaparece después de un obstáculo
@@ -66,8 +69,10 @@ class BrainFollowLine(Brain):
       if foundLine:
         self.post_avoid = False 
       else:
-        # Girar a la derecha buscando la línea, sin rendirse nunca
-        self.move(self.MED_FORWARD, self.MED_RIGHT)
+        self.post_avoid_frames += 1
+        # Giro suave a la derecha, velocidad reducida
+        turn = -0.25 - min(self.post_avoid_frames * 0.005, 0.2)  # máximo -0.45
+        self.move(0.15, turn)
         return
 
     # ── 4. SEGUIMIENTO NORMAL ─────────────────────────────────────────────────
