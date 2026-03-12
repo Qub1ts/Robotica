@@ -24,6 +24,7 @@ class BrainFollowLine(Brain):
     self.line_ended = False
     self.avoiding = False   # Obstáculo activo enfrente
     self.post_avoid = False # Esquivamos un obstáculo, buscando la línea
+    self.last_error = 0.0   # último error conocido de la línea
 
   def destroy(self):
     cv2.destroyAllWindows()
@@ -72,19 +73,27 @@ class BrainFollowLine(Brain):
     # ── 4. SEGUIMIENTO NORMAL ─────────────────────────────────────────────────
     if foundLine:
       self.frames_without_line = 0
+      self.last_error = error
+
       tv = -1.0 * error
       fv = max(0.2, 1.0 - abs(tv * 1.5))
       self.move(fv, tv)
 
     else:
-      # Sin línea, sin obstáculo, sin evasión reciente → posible fin de recorrido
+      # Se perdió la línea: buscar hacia el último lado conocido
       self.frames_without_line += 1
+
       if self.frames_without_line >= self.LINE_END_THRESHOLD:
         self.line_ended = True
         self.move(self.NO_FORWARD, self.NO_TURN)
       else:
-        self.move(self.SLOW_FORWARD, self.NO_TURN)
-
+        # Girar hacia el lado donde estaba la línea por última vez
+        if self.last_error < 0:
+          self.move(self.SLOW_FORWARD, self.MED_LEFT)
+        elif self.last_error > 0:
+          self.move(self.SLOW_FORWARD, self.MED_RIGHT)
+        else:
+          self.move(self.SLOW_FORWARD, self.NO_TURN)
 
 def INIT(engine):
   assert (engine.robot.requires("range-sensor") and
