@@ -4,8 +4,6 @@ from pyrobot.tools.followLineTools import findLineDeviation
 
 class BrainFollowLine(Brain):
  
-    # Mantenemos las constantes, aunque usaremos valores directos 
-    # en algunos puntos para mayor precisión en la fluidez.
     SLOW_FORWARD = 0.1
     MED_FORWARD = 0.5
 
