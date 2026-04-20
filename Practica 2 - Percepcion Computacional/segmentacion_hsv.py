@@ -1,25 +1,3 @@
-"""
-segmentacion_hsv.py
-===================
-Módulo de segmentación por umbral HSV para el robot.
-
-Escenario 1 — Suelo + línea azul + marca/flecha roja.
-Escenario 2 — Objeto circular sobre fondo homogéneo.
-
-Algoritmo elegido: umbralización en espacio HSV
-Justificación:
-  - El espacio HSV desacopla el color (Hue) de la iluminación (Value),
-    lo que da más robustez ante cambios de luz que RGB/rgb normalizado.
-  - La complejidad es O(N) en el número de píxeles: ideal para tiempo real.
-  - Los tres objetos de interés tienen colores muy discriminativos
-    (rojo, azul, beige/gris) → umbrales simples son suficientes.
-  - Alternativas descartadas:
-      · K-means: más lento y no determinista.
-      · GMM / Bayes: requiere entrenamiento por secuencia, frágil ante
-        cambios de escena.
-      · Redes neuronales: excesiva complejidad para este problema.
-"""
-
 import cv2
 import numpy as np
 
@@ -44,21 +22,7 @@ COLOR_FONDO = np.array([  0, 200,   0], dtype=np.uint8)   # verde
 
 
 def segmentar_frame_escenario1(frame_rgb, k_morph=3):
-    """
-    Segmenta un frame del escenario 1.
 
-    Parámetros
-    ----------
-    frame_rgb : np.ndarray (H, W, 3) uint8, espacio RGB
-    k_morph   : int  tamaño del kernel de apertura morfológica (elimina ruido)
-
-    Devuelve
-    --------
-    imagen_coloreada : np.ndarray (H, W, 3) uint8
-        Cada píxel coloreado según su etiqueta.
-    etiquetas : np.ndarray (H, W) uint8
-        0 = fondo, 1 = marca roja, 2 = línea azul
-    """
     hsv = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2HSV)
 
     # Máscara roja (marca / flecha)
@@ -87,101 +51,94 @@ def segmentar_frame_escenario1(frame_rgb, k_morph=3):
     return imagen_coloreada, etiquetas
 
 
-# ─────────────────────────────────────────────
-# Escenario 2 — objeto circular + distancia
-# ─────────────────────────────────────────────
+# ==============================================================================
+# ESCENARIO 2
+# ==============================================================================
+# Colores para las etiquetas de salida del Escenario 2 (BGR)
+COLOR_FONDO_E2 = [0, 0, 0]         # Negro
+COLOR_OBJETO_E2 = [0, 255, 255]    # Amarillo
 
-def detectar_circulo(frame_rgb, dp=1.2, min_dist=50,
-                     param1=80, param2=30,
-                     min_radius=10, max_radius=200):
+def calcular_distancia_pinhole(radio_px, diametro_real_cm, focal_px):
     """
-    Detecta el círculo más prominente en el frame usando HoughCircles.
-
-    Devuelve
-    --------
-    circulo : (cx, cy, r) en píxeles o None si no se detecta.
+    Implementación de la fórmula de la transparencia 37: Z = (f * d) / (u1 - u2)
+    u1 - u2 es el diámetro en píxeles (2 * radio_px)
     """
-    gris = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
-    gris = cv2.GaussianBlur(gris, (9, 9), 2)
-
-    circulos = cv2.HoughCircles(
-        gris,
-        cv2.HOUGH_GRADIENT,
-        dp=dp,
-        minDist=min_dist,
-        param1=param1,
-        param2=param2,
-        minRadius=min_radius,
-        maxRadius=max_radius,
-    )
-
-    if circulos is None:
-        return None
-
-    # Tomamos el círculo con mayor radio (más prominente)
-    circulos = np.round(circulos[0]).astype(int)
-    mejor = max(circulos, key=lambda c: c[2])
-    return tuple(mejor)   # (cx, cy, r)
-
-
-def calcular_distancia(radio_px, diametro_real_cm, focal_px):
-    """
-    Calcula la distancia cámara-objeto usando el modelo pinhole.
-
-        distancia = (diámetro_real * focal) / diámetro_píxeles
-
-    Parámetros
-    ----------
-    radio_px        : radio del objeto en píxeles
-    diametro_real_cm: diámetro real del objeto en cm
-    focal_px        : longitud focal de la cámara en píxeles
-
-    Devuelve
-    --------
-    distancia_cm : float
-    """
-    if radio_px <= 0:
-        return None
+    if radio_px <= 0: return None
     diametro_px = 2 * radio_px
-    return (diametro_real_cm * focal_px) / diametro_px
+    distancia_z = (focal_px * diametro_real_cm) / diametro_px
+    return distancia_z
 
-
-def segmentar_frame_escenario2(frame_rgb,
-                                diametro_real_cm=7.0,
-                                focal_px=600.0,
-                                hsv_lo=None, hsv_hi=None):
+def segmentar_esfera_hsv(frame_rgb, hsv_low, hsv_high):
     """
-    Segmenta el objeto esférico y calcula su distancia.
-
-    Para el fondo homogéneo se usa sustracción de color: el usuario puede
-    proporcionar un rango HSV del objeto o se usa detección por Hough.
-
-    Devuelve
-    --------
-    frame_anotado : frame con el círculo dibujado y la distancia escrita
-    distancia_cm  : float o None
+    Segmenta un objeto por color y devuelve la máscara y el frame etiquetado.
     """
-    frame_anotado = frame_rgb.copy()
+    hsv = cv2.cvtColor(frame_rgb, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, hsv_low, hsv_high)
+    
+    # Limpieza de ruido (Morfología)
+    kernel = np.ones((5,5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    
+    # Crear imagen de etiquetas
+    etiquetas = np.zeros_like(frame_rgb)
+    etiquetas[mask == 0] = COLOR_FONDO_E2
+    etiquetas[mask > 0] = COLOR_OBJETO_E2
+    
+    return mask, etiquetas
+
+def segmentar_frame_escenario2(frame_rgb, hsv_low, hsv_high, d_real_cm, f_calibrada):
+    """
+    Segmenta el objeto esférico y calcula su distancia. Devuelve el frame etiquetado.
+    """
+    mask, frame_etiquetado = segmentar_esfera_hsv(frame_rgb, hsv_low, hsv_high)
+    
+    contornos, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
     distancia_cm = None
+    if contornos:
+        c = max(contornos, key=cv2.contourArea)
+        ((x, y), radio) = cv2.minEnclosingCircle(c)
+        
+        if radio > 5:
+            distancia_cm = calcular_distancia_pinhole(radio, d_real_cm, f_calibrada)
+            
+            # Anotar el frame
+            cv2.circle(frame_etiquetado, (int(x), int(y)), int(radio), (0, 0, 255), 2)
+            texto = f"Distancia: {distancia_cm:.2f} cm"
+            cv2.putText(frame_etiquetado, texto, (30, 50), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                        
+    return frame_etiquetado
 
-    circulo = detectar_circulo(frame_rgb)
+def procesar_video_completo(video_entrada, video_salida, escenario, params=None):
+    """
+    Procesa un vídeo completo usando el algoritmo del escenario indicado.
+    escenario: 1 (Líneas y marcas) o 2 (Esfera y distancia)
+    """
+    cap = cv2.VideoCapture(video_entrada)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(video_salida, fourcc, fps, (width, height))
 
-    if circulo is not None:
-        cx, cy, r = circulo
-        distancia_cm = calcular_distancia(r, diametro_real_cm, focal_px)
+    print(f"Procesando vídeo del Escenario {escenario}...")
+    
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret: break
 
-        # Dibujar círculo y centro
-        cv2.circle(frame_anotado, (cx, cy), r, (0, 255, 0), 3)
-        cv2.circle(frame_anotado, (cx, cy), 4, (0, 0, 255), -1)
+        if escenario == 1:
+            frame_resultado = segmentar_frame_escenario1(frame) # Asume que devuelve el frame etiquetado
+        elif escenario == 2:
+            frame_resultado = segmentar_frame_escenario2(frame, 
+                                                         params['hsv_low'], 
+                                                         params['hsv_high'], 
+                                                         params['d_real'], 
+                                                         params['f_calibrada'])
+        out.write(frame_resultado)
 
-        # Escribir distancia en el lateral izquierdo
-        if distancia_cm is not None:
-            texto = f"Dist: {distancia_cm:.1f} cm"
-            cv2.putText(
-                frame_anotado, texto,
-                (10, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0, (255, 255, 0), 2, cv2.LINE_AA,
-            )
-
-    return frame_anotado, distancia_cm
+    cap.release()
+    out.release()
+    print(f"Vídeo guardado en: {video_salida}")
