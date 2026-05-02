@@ -130,7 +130,9 @@ def procesar_video_completo(video_entrada, video_salida, escenario, params=None)
         if not ret: break
 
         if escenario == 1:
-            frame_resultado = segmentar_frame_escenario1(frame) # Asume que devuelve el frame etiquetado
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_resultado, _ = segmentar_frame_escenario1(frame_rgb)
+            frame_resultado = cv2.cvtColor(frame_resultado, cv2.COLOR_RGB2BGR)
         elif escenario == 2:
             frame_resultado = segmentar_frame_escenario2(frame, 
                                                          params['hsv_low'], 
