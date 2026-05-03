@@ -1,0 +1,263 @@
+% =====================================================================
+%   CONTENIDO LISTO PARA PEGAR EN UNA PLANTILLA BEAMER YA EXISTENTE
+%   (no incluye \documentclass, \begin{document}, ni \title — solo los
+%    \section{} y \begin{frame}{} ... \end{frame}).
+%
+%   Práctica 2 — Percepción Computacional
+%   Robótica y Percepción Computacional · Grado Ingeniería Informática
+%   Autores: Julio Lucero / Agostina Squillari
+% =====================================================================
+
+
+% ---------------------------------------------------------------------
+\section{Suposiciones del problema}
+% ---------------------------------------------------------------------
+
+\begin{frame}{Suposiciones razonables}
+Inspirado en \emph{transp.pdf}, p.~79--80 (\textit{Análisis de imágenes de líneas — Asunciones razonables}).
+\begin{enumerate}\setlength\itemsep{2pt}
+  \item \textbf{Líneas infinitas}: nunca terminan en mitad de la imagen, sólo cortan los bordes.
+  \item \textbf{Sólo se ve el presente}: los segmentos pasados/futuros del trazado no aparecen, así que el error de seguimiento se mide en una franja inferior del frame.
+  \item \textbf{Cámara fija} sobre el robot mirando hacia adelante: el borde inferior del frame es lo que tiene debajo y, por defecto, la \textbf{entrada}.
+  \item \textbf{Colores estables}: línea \textcolor{blue}{azul saturada}, marca \textcolor{red}{roja}, suelo verde-grisáceo de baja saturación.
+  \item \textbf{Marcas vs.\ flechas}: las marcas (\texttt{man}/\texttt{woman}/\texttt{stairs}/\texttt{telephone}) aparecen sólo en tramos rectos; las flechas aparecen en cruces para indicar la salida.
+  \item Los píxeles aislados etiquetados como ``línea'' son siempre \textbf{componentes conexas pequeñas}: filtro por área mínima.
+  \item El robot \textbf{se detiene} cuando se pierde la línea (escena \texttt{sin\_linea}).
+\end{enumerate}
+\end{frame}
+
+
+% ---------------------------------------------------------------------
+\section{Clasificación de la escena}
+% ---------------------------------------------------------------------
+
+\begin{frame}{Pipeline de análisis por frame}
+\begin{enumerate}\setlength\itemsep{2pt}
+  \item Segmentación QDA en \{\textit{fondo}, \textit{marca}, \textit{línea}\} (Escenario 1) o umbralización HSV directa (simulador).
+  \item Limpieza morfológica + filtrado por componentes conexas.
+  \item Detección de \textbf{entradas y salidas} en los 4 bordes.
+  \item Clasificación de la \textbf{escena}.
+  \item Orientación de la \textbf{flecha} (cuando hay cruce) o clasificación de la \textbf{marca} (cuando no).
+  \item Cálculo del \textbf{error} de seguimiento.
+  \item Generación de la \textbf{consigna} de control $(v,\omega)$.
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{Detección de entradas y salidas}
+Para cada componente conexa de la máscara de línea (área $\geq 200$ px):
+\begin{itemize}
+  \item Se proyecta una banda perimetral de 4 px en cada borde.
+  \item Cada \textbf{run} contiguo $\geq 5$ px se reporta como un \textit{Extremo} (lado, posición, longitud, ángulo desde el centro).
+  \item \textbf{Convención}: borde inferior $\Rightarrow$ \textit{entrada}; el resto $\Rightarrow$ \textit{salidas}.
+\end{itemize}
+
+Trabajar por componente conexa filtra de forma natural los falsos positivos del clasificador (sombras y bordes de baldosa).
+\end{frame}
+
+\begin{frame}{Tipos de escena}
+\small
+\begin{tabular}{ll}
+\hline
+\textbf{Tipo}            & \textbf{Condición}\\\hline
+\texttt{sin\_linea}      & no hay extremos\\
+\texttt{fin\_linea}      & 1 entrada, 0 salidas\\
+\texttt{recta}           & 1 entrada + 1 salida superior centrada ($\pm 18\%\,W$)\\
+\texttt{curva\_izq}      & 1 entrada + 1 salida en lateral izq.\ o esq.\ sup.\ izq.\\
+\texttt{curva\_der}      & 1 entrada + 1 salida en lateral der.\ o esq.\ sup.\ der.\\
+\texttt{cruce\_2}        & 1 entrada + 2 salidas (T o bifurcación)\\
+\texttt{cruce\_3}        & 1 entrada + 3 salidas (X)\\\hline
+\end{tabular}
+\\[2mm]
+La clasificación depende sólo del \textbf{número y posición} de las intersecciones con los bordes, lo que la hace invariante a la forma exacta de la línea y a pequeños cambios de iluminación.
+\end{frame}
+
+
+% ---------------------------------------------------------------------
+\section{Orientación de la flecha y salida elegida}
+% ---------------------------------------------------------------------
+
+\begin{frame}{Orientación de la flecha}
+Patrón propuesto en \emph{transp.pdf}, p.~72:
+\begin{enumerate}
+  \item Aislar la silueta de marca (\texttt{cv2.findContours} sobre la máscara roja).
+  \item Ajustar una \textbf{elipse mínima}:\\
+        \texttt{(cx,cy),(eM,em),ang = cv2.fitEllipse(cnt)}
+  \item El \textbf{eje principal} da la dirección, módulo $180^{\circ}$.
+  \item El \textbf{sentido} (cabeza vs.\ cola) se decide por la asimetría del contorno respecto al centroide \emph{a lo largo del eje principal}: el lado \textbf{menos extendido} es la dirección apuntada.
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{Selección de la salida}
+\textbf{Salida elegida} =
+\[
+   \arg\min_{s \in \text{salidas}}\; \bigl|\angle s - \angle \text{flecha}\bigr|
+\]
+donde $\angle s$ es el ángulo desde el centro del frame al punto de salida, expresado en $(-180^{\circ},180^{\circ}]$.
+
+\medskip
+La diferencia angular se calcula con envolvimiento por $360^{\circ}$ para evitar discontinuidades en torno a $\pm 180^{\circ}$.
+\end{frame}
+
+
+% ---------------------------------------------------------------------
+\section{Error de seguimiento y consigna de control}
+% ---------------------------------------------------------------------
+
+\begin{frame}{Error de seguimiento}
+Sólo se mira lo que el robot tiene \emph{inmediatamente delante} (suposición A2):
+\begin{itemize}
+  \item \textbf{Banda inferior} de $40$ px ($\approx 17\%$ de la altura).
+  \item Centroide horizontal $\bar{x}$ de los píxeles de línea en esa banda.
+\end{itemize}
+
+\medskip
+\[
+e \;=\; \frac{\bar{x} - W/2}{W/2} \;\in\; [-1,\,+1]
+\]
+
+\begin{itemize}
+  \item $e<0$: línea a la \textbf{izquierda}.
+  \item $e>0$: línea a la \textbf{derecha}.
+  \item $e=0$: línea centrada.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Consigna del control PD}
+Procedimiento propuesto:
+\[
+\boxed{\;\;
+\omega = -K_p\, e \;-\; K_d\, \dot{e},\qquad
+v = \max\!\bigl(v_{\min},\; v_{\max}(1 - \alpha\,|e|)\bigr) \;\;}
+\]
+
+\begin{itemize}
+  \item Velocidad lineal $v$ \textbf{decreciente} con $|e|$ (más cuidado en curvas pronunciadas).
+  \item Velocidad angular $\omega$ proporcional al error con un término derivativo que amortigua oscilaciones.
+  \item Si se pierde la línea (\texttt{sin\_linea}), $v=\omega=0$ (el robot espera).
+\end{itemize}
+
+\medskip
+Parámetros usados: $K_p=1.2,\;K_d=0.4,\;v_{\max}=0.5,\;v_{\min}=0.05,\;\alpha=0.7$.
+\end{frame}
+
+
+% ---------------------------------------------------------------------
+\section{Clasificador de marcas}
+% ---------------------------------------------------------------------
+
+\begin{frame}{Clasificación de marcas (sin flecha)}
+Cuatro clases (\emph{transp.pdf}, p.~80):
+\centerline{\texttt{man} \quad \texttt{woman} \quad \texttt{stairs} \quad \texttt{telephone}}
+
+\medskip
+\textbf{Procedimiento de descripción}:
+\begin{enumerate}
+  \item Segmentación HSV del rojo $\Rightarrow$ silueta binaria.
+  \item Mayor componente conexa $\Rightarrow$ recorte por bounding box.
+  \item Descriptor de \textbf{11 características}:
+  \begin{itemize}
+    \item $7$ logaritmos signados de los \textbf{momentos de Hu} (invariantes a $T,R,S$).
+    \item $4$ \textbf{ratios de forma}: \texttt{aspect}, \texttt{extent}, \texttt{solidity}, \texttt{circularity}.
+  \end{itemize}
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{Comparativa de clasificadores (LOO)}
+Dataset \texttt{marcas-capturasStage}: $4 \times 7 = 28$ imágenes.
+\medskip
+
+\begin{center}
+\begin{tabular}{lc}
+\hline
+\textbf{Modelo}     & \textbf{Acc Leave-One-Out}\\\hline
+QDA ($\lambda=0.05$) & $0.5714$\\
+\textbf{LDA (svd)}   & $\mathbf{0.9643}$\\
+KNN ($k=1$)          & $0.6786$\\
+KNN ($k=3$)          & $0.6786$\\\hline
+\end{tabular}
+\end{center}
+
+\medskip
+QDA se sobreajusta (cada $\Sigma_k$ tiene 66 parámetros y sólo hay 7 muestras por clase).\\
+\textbf{LDA} comparte $\Sigma$ entre clases $\Rightarrow$ generaliza muy bien con datos limitados.
+\end{frame}
+
+\begin{frame}{Resultados del clasificador (LDA, LOO)}
+\small
+\begin{tabular}{lcccc}
+\hline
+\textbf{Clase} & \textbf{P} & \textbf{R} & \textbf{F1} & \textbf{N}\\\hline
+\texttt{man}        & 1.000 & 1.000 & 1.000 & 7\\
+\texttt{stairs}     & 0.875 & 1.000 & 0.933 & 7\\
+\texttt{telephone}  & 1.000 & 0.857 & 0.923 & 7\\
+\texttt{woman}      & 1.000 & 1.000 & 1.000 & 7\\\hline
+\textbf{macro}      & 0.969 & 0.964 & 0.964 & 28\\\hline
+\end{tabular}
+
+\medskip
+Una sola confusión: \texttt{telephone} clasificado como \texttt{stairs} en una de las 7 muestras.
+\end{frame}
+
+
+% ---------------------------------------------------------------------
+\section{Validación sobre vídeo}
+% ---------------------------------------------------------------------
+
+\begin{frame}{Validación: vídeo \texttt{proyectoRobotica\dots}}
+\begin{itemize}
+  \item $320 \times 240$, $15$\,fps, $816$ frames, simulador Stage.
+  \item Segmentación HSV directa (fondo blanco): no hace falta el QDA real.
+  \item \textbf{Throughput} de procesado: $\sim\!360$ FPS ($2.8$ ms/frame).
+\end{itemize}
+
+\medskip
+\textbf{Distribución de escenas detectadas}:
+\begin{center}
+\small
+\begin{tabular}{lr}
+\texttt{recta}      &  $33.7\%$\\
+\texttt{curva\_izq} &  $25.1\%$\\
+\texttt{cruce\_2}   &  $18.6\%$\\
+\texttt{sin\_linea} &  $8.5\%$\\
+\texttt{curva\_der} &  $5.8\%$\\
+\texttt{cruce\_3}   &  $4.9\%$\\
+\texttt{fin\_linea} &  $3.4\%$
+\end{tabular}
+\end{center}
+\end{frame}
+
+\begin{frame}{Validación: predicciones de marcas en el vídeo}
+\centering\small
+\begin{tabular}{rllrl}
+\hline
+\textbf{Frame} & \textbf{Escena} & \textbf{Flecha $\to$ salida} & \textbf{$e$} & \textbf{Marca}\\\hline
+70   & recta    & ---           & $+0.24$ & \texttt{man (1.00)}\\
+226  & cruce\_2 & $+55^{\circ}\to$ arriba    & $+0.10$ & ---\\
+315  & cruce\_2 & $+171^{\circ}\to$ izquierda & $-0.38$ & ---\\
+424  & recta    & ---           & $-0.26$ & \texttt{telephone (1.00)}\\
+542  & recta    & ---           & $-0.25$ & \texttt{stairs (1.00)}\\
+737  & cruce\_2 & $-166^{\circ}\to$ izquierda & $+0.92$ & ---\\\hline
+\end{tabular}
+
+\medskip
+La regla \emph{``en cruces, sólo flecha; en rectas, marca''} (sup.~5) evita confundir las dos clases de objetos rojos.
+\end{frame}
+
+
+% ---------------------------------------------------------------------
+\section{Conclusiones}
+% ---------------------------------------------------------------------
+
+\begin{frame}{Conclusiones}
+\begin{itemize}
+  \item Las \textbf{7 suposiciones} de partida reducen el problema a (i) clasificar la escena, (ii) elegir salida, (iii) calcular consigna.
+  \item Detectar entradas/salidas \textbf{por componente conexa} es robusto frente a falsos positivos.
+  \item \textbf{LDA} con descriptor Hu+ratios consigue $96.4\%$ LOO sobre 28 imágenes.
+  \item \textbf{El pipeline funciona en tiempo real} ($\geq 100$ FPS sobre vídeo real, $\geq 350$ FPS sobre el del simulador).
+  \item Trabajos futuros: \textbf{ORB} (p.~70) para describir las marcas con más invariancia, integrar la consigna en el control real del robot, ampliar el dataset.
+\end{itemize}
+\end{frame}
+
+% =====================================================================
+%   FIN DEL CONTENIDO
+% =====================================================================
