@@ -280,13 +280,38 @@ class PrediccionMarca:
     silueta: np.ndarray
 
 
+def _rangos_por_clase(ds: 'Dataset', margen: float = 0.10
+                      ) -> Dict[int, np.ndarray]:
+    """Para cada clase, devuelve [min, max] de los 4 ratios de forma
+    (índices 7-10 del descriptor) con un margen aditivo.
+
+    Sirve como filtro de outliers: una silueta cuyos 4 ratios no caen
+    dentro del rango EXPANDIDO de la clase predicha es probablemente un
+    objeto rojo distinto a las marcas entrenadas (típicamente una
+    flecha direccional en cruces).
+    """
+    rangos = {}
+    for k in range(len(CLASES)):
+        Xc = ds.X[ds.y == k][:, 7:11]
+        rangos[k] = np.column_stack([Xc.min(axis=0) - margen,
+                                     Xc.max(axis=0) + margen])
+    return rangos
+
+
 def predecir(bgr: np.ndarray,
              clf,
              area_min: int = 200,
-             umbral_conf: float = 0.55) -> Optional[PrediccionMarca]:
+             umbral_conf: float = 0.55,
+             rangos: Optional[Dict[int, np.ndarray]] = None
+             ) -> Optional[PrediccionMarca]:
     """Detecta y clasifica una marca en una imagen BGR.
 
-    Devuelve ``None`` si no hay silueta válida o la confianza es baja.
+    Devuelve ``None`` si:
+        * no hay silueta roja suficientemente grande,
+        * la confianza del clasificador está por debajo de ``umbral_conf``,
+        * o, si ``rangos`` está dado, alguno de los 4 ratios de forma
+          cae fuera del rango expandido de la clase predicha
+          (filtro de outliers — rechaza, p.ej., flechas direccionales).
     """
     out = silueta_marca(bgr, area_min=area_min)
     if out is None:
@@ -299,6 +324,14 @@ def predecir(bgr: np.ndarray,
     conf = float(probs[pred]) if probs is not None else 1.0
     if conf < umbral_conf:
         return None
+
+    if rangos is not None:
+        rng = rangos.get(pred)
+        if rng is not None:
+            ratios = feat[0, 7:11]
+            if np.any(ratios < rng[:, 0]) or np.any(ratios > rng[:, 1]):
+                return None
+
     return PrediccionMarca(
         clase=CLASES[pred], confianza=conf, bbox=bbox, silueta=sil
     )
@@ -321,3 +354,111 @@ def dibujar_prediccion(bgr: np.ndarray,
     cv2.putText(out, txt, (x, max(12, y - 4)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
     return out
+
+
+# ===========================================================================
+# 7.  PROCESADO DE VÍDEO — SOLO CLASIFICADOR
+# ===========================================================================
+def anotar_solo_clasificador(bgr: np.ndarray,
+                             clf,
+                             area_min: int = 200,
+                             umbral_conf: float = 0.55,
+                             rangos: Optional[Dict[int, np.ndarray]] = None
+                             ) -> Tuple[np.ndarray, Optional[PrediccionMarca]]:
+    """Anota un frame con SOLO el resultado del clasificador de marcas.
+
+    No muestra información de escena, entrada/salida, error ni consigna.
+    Pensado para validar visualmente el clasificador sobre el vídeo
+    ``proyectoRobotica…`` independientemente del resto del pipeline.
+
+    Si no hay marca o la confianza es baja, devuelve el frame con un
+    pequeño rótulo ``Sin marca`` y ``pred = None``.
+    """
+    pred = predecir(bgr, clf, area_min=area_min,
+                    umbral_conf=umbral_conf, rangos=rangos)
+    out = bgr.copy()
+    h, w = out.shape[:2]
+
+    # Cabecera con el nombre del clasificador y las clases
+    titulo = 'Clasificador de marcas (LDA)'
+    subtitulo = 'Clases: ' + ' / '.join(CLASES)
+    for i, txt in enumerate([titulo, subtitulo]):
+        y_t = 16 + i * 16
+        cv2.putText(out, txt, (6, y_t), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(out, txt, (6, y_t), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42, (255, 255, 255), 1, cv2.LINE_AA)
+
+    if pred is None:
+        msg = 'Sin marca'
+        cv2.putText(out, msg, (6, h - 8), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(out, msg, (6, h - 8), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, (180, 180, 180), 1, cv2.LINE_AA)
+        return out, None
+
+    # Bounding box + etiqueta de la clase
+    x, y, ww, hh = pred.bbox
+    cv2.rectangle(out, (x, y), (x + ww, y + hh), (0, 200, 255), 2)
+    txt = f'{pred.clase}  ({pred.confianza:.2f})'
+    # Texto debajo del bbox si hay sitio, encima si no
+    ty = y + hh + 16 if (y + hh + 16) < h else max(12, y - 6)
+    cv2.putText(out, txt, (x, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                0.50, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(out, txt, (x, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                0.50, (0, 200, 255), 1, cv2.LINE_AA)
+    return out, pred
+
+
+def procesar_video_clasificador(video_in: str,
+                                video_out: str,
+                                clf,
+                                area_min: int = 200,
+                                umbral_conf: float = 0.55,
+                                rangos: Optional[Dict[int, np.ndarray]] = None,
+                                verbose: bool = True) -> dict:
+    """Procesa un vídeo entero anotando SOLO el resultado del clasificador.
+
+    Devuelve un diccionario con el conteo de detecciones por clase y
+    el tiempo medio por frame.
+    """
+    import time
+    from collections import Counter
+
+    cap = cv2.VideoCapture(video_in)
+    if not cap.isOpened():
+        raise FileNotFoundError(video_in)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(video_out, fourcc, fps, (w, h))
+
+    cuentas = Counter()
+    tiempos = []
+    for i in range(n):
+        ok, bgr = cap.read()
+        if not ok:
+            break
+        t0 = time.perf_counter()
+        an, pred = anotar_solo_clasificador(bgr, clf,
+                                            area_min=area_min,
+                                            umbral_conf=umbral_conf,
+                                            rangos=rangos)
+        tiempos.append(time.perf_counter() - t0)
+        writer.write(an)
+        cuentas[pred.clase if pred else 'sin_marca'] += 1
+        if verbose and (i + 1) % 200 == 0:
+            ms = float(np.mean(tiempos[-200:])) * 1000
+            print(f'  Frame {i+1:4d}/{n}   ({ms:.1f} ms/frame)')
+
+    cap.release()
+    writer.release()
+    return {
+        'detecciones': cuentas,
+        'ms_frame'   : float(np.mean(tiempos) * 1000),
+        'n_frames'   : len(tiempos),
+        'fps_video'  : float(fps),
+    }
