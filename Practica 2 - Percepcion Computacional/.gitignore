@@ -1,0 +1,52 @@
+# ===== Caches y artefactos de Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# ===== Entornos virtuales =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== Editor / SO =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== LaTeX (auxiliares; el .pdf SÍ se sube) =====
+memoria/*.aux
+memoria/*.log
+memoria/*.out
+memoria/*.toc
+memoria/*.synctex.gz
+memoria/*.fls
+memoria/*.fdb_latexmk
+memoria/*.bbl
+memoria/*.blg
+
+# ===== Material original que no debería estar en el repo =====
+Tarea.zip
+Tarea/
+
+# ===== Salidas duplicadas o regenerables =====
+proyectoRobotica_clasificador.mp4
+pelota_demo_curva.png
+
+# ===== Archivos pesados que GitHub rechazaría (>100MB) =====
+# Si algún vídeo crece, descomenta:
+# *.avi
+# *.mp4
+
+# ===== Carpetas temporales =====
+data/
+out/
+tmp/
