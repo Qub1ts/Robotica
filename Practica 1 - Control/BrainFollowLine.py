@@ -3,13 +3,11 @@ import cv2
 from pyrobot.tools.followLineTools import findLineDeviation
 
 class BrainFollowLine(Brain):
- 
-    SLOW_FORWARD = 0.1
-    MED_FORWARD = 0.5
 
     def setup(self):
-        self.last_error = 0 
-        self.avoidance_steps = 0 
+        self.last_error = 0.0 
+        self.avoiding = False 
+        self.avoid_ticks = 0 
 
     def destroy(self):
         cv2.destroyAllWindows()
@@ -22,42 +20,71 @@ class BrainFollowLine(Brain):
         imageGray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
         foundLine, error = findLineDeviation(imageGray)
 
+        # Sensores frontales (2, 3, 4, 5) para choque
         front_distances = [self.robot.range[i].distance() for i in range(2, 6)]
         min_front_dist = min(front_distances)
 
-        # 1. EVASIÓN DE OBSTÁCULOS (Transición Fluida)
-        # Aumentamos un pelín la distancia de detección para tener espacio de hacer la curva
-        if min_front_dist < 0.35:
-            # FLUCTUACIÓN 1: En lugar de frenar a cero, avanzamos a 0.15 mientras giramos fuerte.
-            # Esto dibuja una curva suave hacia afuera en lugar de un quiebre en "V".
-            self.move(0.15, 1.0) 
-            self.avoidance_steps = 15 
-            self.last_error = 1.0 
+        # Sensores izquierdos (0, 1, 2) para seguir la pared 
+        # (Como esquivamos por la derecha, la caja SIEMPRE estará a la izquierda)
+        left_distances = [self.robot.range[i].distance() for i in range(0, 3)]
+        min_left_dist = min(left_distances)
+
+        # 1. INICIAR EVASIÓN (Siempre a la derecha)
+        if min_front_dist < 0.35 and not self.avoiding:
+            self.avoiding = True
+            self.avoid_ticks = 0 
             
-        elif self.avoidance_steps > 0:
-            # FLUCTUACIÓN 2: En lugar de ir recto, hacemos una curva muy abierta a la derecha.
-            # Esto hace que el robot empiece a "abrazar" o envolver el obstáculo con fluidez.
-            self.move(self.MED_FORWARD, -0.25) 
-            self.avoidance_steps -= 1
-            
-        elif not foundLine:
-            # 3. RECUPERACIÓN DE LÍNEA
-            # Mantenemos un poco de avance (0.2) para que la reincorporación sea en arco.
-            if self.last_error > 0:
-                self.move(0.2, -0.8) # Arco suave a la derecha
-            else:
-                self.move(0.2, 0.8)  # Arco suave a la izquierda
+        # 2. MÁQUINA DE ESTADOS: ESQUIVAR POR LA DERECHA
+        elif self.avoiding:
+            self.avoid_ticks += 1 
+
+            # Condición de salida (Ceguera temporal superada)
+            if foundLine and min_front_dist > 0.4 and self.avoid_ticks > 40:
+                self.avoiding = False
                 
+                # CLAVE: Al terminar de rodear la caja, cruzará la línea.
+                # Inyectamos un error positivo (1.0) para OBLIGARLO a girar a la 
+                # derecha cuando pierda la línea, alineándose con la pista.
+                self.last_error = 1.0 
+                return 
+
+            # CASO A: Frente bloqueado -> Girar a la DERECHA para esquivar
+            if min_front_dist < 0.35:
+                self.move(0.0, -1.0)
+            
+            # CASO B: Esquina detectada -> Girar a la IZQUIERDA para envolver la caja
+            elif min_left_dist > 0.5:
+                self.move(0.0, 1.0)
+            
+            # CASO C: Bordeando la pared izquierda (Controlador Proporcional Invertido)
+            else:
+                dist_objetivo = 0.30 
+                error_pared = dist_objetivo - min_left_dist
+                
+                # Si está muy cerca de la pared izquierda, debe girar a la derecha (negativo)
+                tv_avoid = -2.5 * error_pared 
+                tv_avoid = max(-1.0, min(1.0, tv_avoid)) 
+                
+                self.move(0.15, tv_avoid)
+            
+        # 3. RECUPERACIÓN DE LÍNEA ANTI-RETROCESO
+        elif not foundLine:
+            if self.last_error > 0:
+                self.move(0.0, -0.8) # Gira a la derecha
+            else:
+                self.move(0.0, 0.8)  # Gira a la izquierda
+                
+        # 4. SEGUIMIENTO DE LÍNEA FLUIDO (Normal)
         else:
-            # 4. SEGUIMIENTO DE LÍNEA FLUIDO
-            self.last_error = error 
+            self.avoiding = False 
             
-            # FLUCTUACIÓN 3: Suavizamos el controlador proporcional.
-            # Al multiplicar por 0.8 en vez de 1.0, el robot zigzaguea menos en las rectas.
-            tv = -0.8 * error 
+            # Ignoramos lecturas de error = ~0.0 para no borrar la memoria
+            # del giro a la derecha que inyectamos al salir de la evasión.
+            if abs(error) > 0.15:
+                self.last_error = error 
             
-            # El frenado en curvas ahora es más gradual.
-            fv = max(0.15, 0.8 - abs(error)) 
+            tv = -1.2 * error 
+            fv = max(0.05, 0.4 - abs(error)) 
             
             self.move(fv, tv)
 
@@ -65,4 +92,4 @@ def INIT(engine):
     assert (engine.robot.requires("range-sensor") and
             engine.robot.requires("continuous-movement"))
 
-    return BrainFollowLine('BrainFollowLine', engine)
+    return BrainFollowLine('BrainFollowLine', engine) 
