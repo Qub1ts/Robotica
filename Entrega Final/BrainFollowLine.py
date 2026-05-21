@@ -112,19 +112,18 @@ class BrainFollowLine(Brain):
 
     # Umbrales
     FRANJA_ERROR, BANDA_BORDE, MIN_SEGMENTO, FUSION_GAP = 40, 4, 5, 8
-    AREA_MIN_FLECHA, FLECHA_CIRC_MAX, FLECHA_ELONG_MIN = 120, 0.45, 2.5
-    MARCA_AREA_MIN, MARCA_COOLDOWN, ARROW_TTL = 300, 25, 60
+    AREA_MIN_FLECHA, FLECHA_CIRC_MAX, FLECHA_ELONG_MIN = 120, 0.35, 3.0
+    MARCA_AREA_MIN, MARCA_COOLDOWN, ARROW_TTL = 300, 25, 150
     DIST_FRONTAL_OBST, DIST_FRENTE_LIBRE, DIST_OBJETIVO_PARED, AVOID_TICKS_MIN = 0.40, 0.40, 0.30, 40
     
-    # Fracción de pantalla para girar (0.85 = giro inminente)
-    JUNCTION_Y_FRAC = 0.85   
-    JUNCTION_MIN_RUN = 4
+    JUNCTION_Y_FRAC = 0.75   
+    JUNCTION_MIN_RUN = 3
 
     def setup(self):
         print('Cargando modelos QDA y LDA...')
         self.clf_qda = entrenar_qda_linea()
         self.clf_lda, self.rangos_marcas = entrenar_lda_marcas()
-        print('Modelos listos.')
+        print('Modelos listos. ¡Todo preparado para la prueba final!')
         
         self.prev_error = None
         self.last_error = 0.0
@@ -198,7 +197,6 @@ class BrainFollowLine(Brain):
         longitud = float(proy_a.max() - proy_a.min())
         if longitud < 5: return None
         
-        # Restaurada la lógica original para distinguir punta de cola
         franja = 0.25 * longitud
         sel_pos, sel_neg = proy_a > (proy_a.max() - franja), proy_a < (proy_a.min() + franja)
         sel_cen = np.abs(proy_a) < (0.20 * longitud)
@@ -209,15 +207,20 @@ class BrainFollowLine(Brain):
         ratio_pos, ratio_neg = w_pos / w_cen, w_neg / w_cen
         sentido = 1 if ratio_pos > ratio_neg else -1
         
+        s_pos = float(proy_p[sel_pos].max() - proy_p[sel_pos].min()) if len(proy_p[sel_pos]) >= 5 else 0.0
+        s_neg = float(proy_p[sel_neg].max() - proy_p[sel_neg].min()) if len(proy_p[sel_neg]) >= 5 else 0.0
+        max_s = max(s_pos, s_neg)
+        if max_s > 1e-3 and abs(s_pos - s_neg) / max_s < 0.40: return None
+        
         idx = int(np.argmax(proy_a)) if sentido == 1 else int(np.argmin(proy_a))
         px, py = float(pts[idx, 0]), float(pts[idx, 1])
         return {'angulo': math.degrees(math.atan2(cy - py, px - cx)), 'centro': (cx, cy), 'contorno': cnt, 'punta': (px, py)}
 
-    def elegir_salida(self, extremos, flecha):
+    def elegir_salida(self, extremos, flecha_logica):
         salidas = [e for e in extremos if not e['es_entrada']]
         if not salidas: return None
-        if not flecha: return min(salidas, key=lambda e: abs((e['angulo'] - 90 + 180) % 360 - 180))
-        return min(salidas, key=lambda e: abs((e['angulo'] - flecha['angulo'] + 180) % 360 - 180))
+        if not flecha_logica: return min(salidas, key=lambda e: abs((e['angulo'] - 90 + 180) % 360 - 180))
+        return min(salidas, key=lambda e: abs((e['angulo'] - flecha_logica['angulo'] + 180) % 360 - 180))
 
     def control_pd(self, error):
         d = 0.0 if self.prev_error is None else (error - self.prev_error)
@@ -226,10 +229,9 @@ class BrainFollowLine(Brain):
         factor = min(max(0.0, 1.0 - self.ALPHA_V_W * abs(omega)), max(0.0, 1.0 - self.ALPHA_V_E * abs(error)))
         return max(self.SLOW_FORWARD, self.FULL_FORWARD * factor), omega
 
-    def dibujar_overlay(self, bgr, m_lin, m_rojo, ext, sal_elegida, flecha, marca, err, v, w, estado, junc_y):
+    def dibujar_overlay(self, bgr, m_lin, m_rojo, ext, sal_elegida, flecha_visual, flecha_logica, marca, err, v, w, estado, junc_y):
         h, w_img = bgr.shape[:2]
         
-        # Capa segura, evita pantalla blanca
         overlay = bgr.copy()
         overlay[m_lin] = (255, 0, 0)
         overlay[m_rojo] = (0, 0, 255)
@@ -251,9 +253,9 @@ class BrainFollowLine(Brain):
             cv2.putText(out, txt_lbl, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,0,0), 3, cv2.LINE_AA)
             cv2.putText(out, txt_lbl, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.4, col, 1, cv2.LINE_AA)
             
-        if flecha:
-            cv2.drawContours(out, [flecha['contorno']], -1, (255, 255, 0), 1)
-            cxf, cyf, pxf, pyf = *map(int, flecha['centro']), *map(int, flecha['punta'])
+        if flecha_visual:
+            cv2.drawContours(out, [flecha_visual['contorno']], -1, (255, 255, 0), 1)
+            cxf, cyf, pxf, pyf = *map(int, flecha_visual['centro']), *map(int, flecha_visual['punta'])
             cv2.arrowedLine(out, (cxf, cyf), (pxf, pyf), (0, 255, 255), 2, tipLength=0.30)
             
         if marca:
@@ -261,9 +263,11 @@ class BrainFollowLine(Brain):
             cv2.rectangle(out, (x0, y0), (x0+ww, y0+hh), (0, 200, 255), 2)
             cv2.putText(out, f"{marca[0]}", (x0, max(12, y0-4)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1, cv2.LINE_AA)
 
+        flecha_str = f"{flecha_logica['angulo']:+5.0f} deg" if flecha_logica else "--"
         lineas = [
             f"Estado: {estado}", 
             f"Eleg: {sal_elegida['lado'] if sal_elegida else '--'}", 
+            f"Flecha (mem): {flecha_str}",
             f"Error: {err:+.2f}" if err is not None else "Error: --", 
             f"v={v:+.2f} w={w:+.2f}"
         ]
@@ -293,37 +297,46 @@ class BrainFollowLine(Brain):
             self.last_marca = marca_actual[0]
             self.cooldown_marca = self.MARCA_COOLDOWN
 
-        flecha = self.detectar_flecha(m_rojo) if not marca_actual else None
-        if flecha:
-            self.arrow_cache, self.arrow_ttl_left = flecha, self.ARROW_TTL
+        flecha_visual = self.detectar_flecha(m_rojo) if not marca_actual else None
+        if flecha_visual:
+            self.arrow_cache, self.arrow_ttl_left = flecha_visual, self.ARROW_TTL
         elif self.arrow_ttl_left > 0:
-            self.arrow_ttl_left -= 1; flecha = self.arrow_cache
+            self.arrow_ttl_left -= 1
+            
+        flecha_logica = self.arrow_cache if self.arrow_ttl_left > 0 else None
 
         error = self.error_seguimiento(m_lin)
         junc_y = self.junction_y(m_lin) if len(salidas) >= 2 else None
         
-        # Se calcula temprano para que UI lo pinte en cyan de inmediato
-        salida_elegida = self.elegir_salida(extremos, flecha) if len(salidas) >= 2 else None
+        salida_elegida = self.elegir_salida(extremos, flecha_logica) if len(salidas) >= 2 else None
         v_cmd, w_cmd, estado = self.NO_FORWARD, self.NO_TURN, ""
 
-        # 1. MÁQUINA DE ESTADOS: EVASIÓN
+        # =================================================================
+        # 1. MÁQUINA DE ESTADOS: EVASIÓN CON REINTEGRACIÓN EN CURVA
+        # =================================================================
         if min_front < self.DIST_FRONTAL_OBST and not self.avoiding:
             self.avoiding, self.avoid_ticks, self.prev_error = True, 0, None
 
         if self.avoiding:
             self.avoid_ticks += 1
-            # Corrección vital: Salir solo si de verdad está pisando la línea (error no es None)
+            
+            # Sale de la evasión cuando detecta la línea, pero SIN forzar self.last_error
+            # Dejamos que el controlador PD lea el error real de la cámara.
             if error is not None and min_front > self.DIST_FRENTE_LIBRE and self.avoid_ticks > self.AVOID_TICKS_MIN:
-                self.avoiding, self.last_error, estado = False, 1.0, 'POST-AVOID'
+                self.avoiding, estado = False, 'POST-AVOID'
             elif min_front < self.DIST_FRONTAL_OBST:
-                v_cmd, w_cmd, estado = 0.0, -1.0, 'AVOID-FRONT' # Gira rápido der
-            elif min_left > 0.6:
-                v_cmd, w_cmd, estado = 0.0, 1.0, 'AVOID-CORNER' # Gira rápido izq
+                v_cmd, w_cmd, estado = 0.0, -1.0, 'AVOID-FRONT' 
+            elif min_left > 0.5:
+                # AQUÍ ESTÁ LA MAGIA: Arco suave en lugar de pivotar en el sitio
+                # Esto obliga al robot a morder la línea en diagonal.
+                v_cmd, w_cmd, estado = 0.12, 0.5, 'AVOID-CORNER' 
             else:
                 w_cmd = max(-1.0, min(1.0, -2.5 * (self.DIST_OBJETIVO_PARED - min_left)))
-                v_cmd, estado = 0.15, 'AVOID-WALL'              # Bordeando 
+                v_cmd, estado = 0.15, 'AVOID-WALL'              
                 
-        # 2. CRUCE (Gira solo si la bifurcación toca la franja baja)
+        # =================================================================
+        # 2. CRUCE INMINENTE 
+        # =================================================================
         elif len(salidas) >= 2 and junc_y is not None and junc_y >= bgr.shape[0] * self.JUNCTION_Y_FRAC:
             if salida_elegida:
                 err_x = (salida_elegida['punto'][0] - bgr.shape[1] / 2.0) / (bgr.shape[1] / 2.0)
@@ -334,19 +347,25 @@ class BrainFollowLine(Brain):
                 v_cmd, w_cmd = self.control_pd(error)
                 estado = 'CRUCE -> PD'
                 
-        # 3. SEGUIMIENTO DE LÍNEA NORMAL
+        # =================================================================
+        # 3. SEGUIMIENTO NORMAL
+        # =================================================================
         elif error is not None:
             if abs(error) > 0.10: self.last_error = error
             v_cmd, w_cmd = self.control_pd(error)
             estado = 'FOLLOW'
             
-        # 4. BÚSQUEDA DE LÍNEA
+        # =================================================================
+        # 4. BÚSQUEDA 
+        # =================================================================
         else:
             self.prev_error = None
             v_cmd, w_cmd, estado = self.SLOW_FORWARD, (-0.6 if self.last_error > 0 else 0.6), 'BUSCAR'
 
         self.move(v_cmd, w_cmd)
-        cv2.imshow('Stage Camera Image', self.dibujar_overlay(bgr, m_lin, m_rojo, extremos, salida_elegida, flecha, marca_actual, error, v_cmd, w_cmd, estado, junc_y))
+        
+        out = self.dibujar_overlay(bgr, m_lin, m_rojo, extremos, salida_elegida, flecha_visual, flecha_logica, marca_actual, error, v_cmd, w_cmd, estado, junc_y)
+        cv2.imshow('Stage Camera Image', out)
         cv2.waitKey(1)
 
 def INIT(engine):
