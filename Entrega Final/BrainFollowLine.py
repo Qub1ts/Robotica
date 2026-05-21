@@ -91,12 +91,23 @@ def entrenar_lda_marcas():
 def predecir_marca(bgr, clf, rangos, area_min=300, umbral_conf=0.55):
     out = _silueta_de_bgr(bgr, area_min)
     if not out: return None
-    feat = _descriptor_marca(out[0]).reshape(1, -1)
+    sil, bbox = out
+    
+    # Escudo de Borde: Ignora los blobs rojos que tocan la parte inferior del frame
+    h_img = bgr.shape[0]
+    if (bbox[1] + bbox[3]) >= (h_img - 5): 
+        return None
+        
+    feat = _descriptor_marca(sil).reshape(1, -1)
     probs = clf.predict_proba(feat)[0]
     pred = int(clf.predict(feat)[0])
     conf = float(probs[pred])
-    if conf < umbral_conf or (rangos and pred in rangos and (np.any(feat[0, 7:11] < rangos[pred][:, 0]) or np.any(feat[0, 7:11] > rangos[pred][:, 1]))): return None
-    return CLASES_MARCAS[pred], conf, out[1]
+    
+    # Filtro de seguridad LDA
+    if conf < umbral_conf or (rangos and pred in rangos and (np.any(feat[0, 7:11] < rangos[pred][:, 0]) or np.any(feat[0, 7:11] > rangos[pred][:, 1]))): 
+        return None
+        
+    return CLASES_MARCAS[pred], conf, bbox
 
 
 # ======================================================================
@@ -113,7 +124,7 @@ class BrainFollowLine(Brain):
     # Umbrales
     FRANJA_ERROR, BANDA_BORDE, MIN_SEGMENTO, FUSION_GAP = 40, 4, 5, 8
     AREA_MIN_FLECHA, FLECHA_CIRC_MAX, FLECHA_ELONG_MIN = 120, 0.35, 3.0
-    MARCA_AREA_MIN, MARCA_COOLDOWN, ARROW_TTL = 300, 25, 150
+    MARCA_AREA_MIN, MARCA_COOLDOWN, ARROW_TTL = 300, 25, 300
     DIST_FRONTAL_OBST, DIST_FRENTE_LIBRE, DIST_OBJETIVO_PARED, AVOID_TICKS_MIN = 0.40, 0.40, 0.30, 40
     
     JUNCTION_Y_FRAC = 0.75   
@@ -123,7 +134,7 @@ class BrainFollowLine(Brain):
         print('Cargando modelos QDA y LDA...')
         self.clf_qda = entrenar_qda_linea()
         self.clf_lda, self.rangos_marcas = entrenar_lda_marcas()
-        print('Modelos listos. ¡Todo preparado para la prueba final!')
+        print('Modelos listos. ¡Todo preparado para la entrega final!')
         
         self.prev_error = None
         self.last_error = 0.0
@@ -229,7 +240,7 @@ class BrainFollowLine(Brain):
         factor = min(max(0.0, 1.0 - self.ALPHA_V_W * abs(omega)), max(0.0, 1.0 - self.ALPHA_V_E * abs(error)))
         return max(self.SLOW_FORWARD, self.FULL_FORWARD * factor), omega
 
-    def dibujar_overlay(self, bgr, m_lin, m_rojo, ext, sal_elegida, flecha_visual, flecha_logica, marca, err, v, w, estado, junc_y):
+    def dibujar_overlay(self, bgr, m_lin, m_rojo, ext, sal_elegida, flecha_visual, flecha_logica, marca, err, v, w, estado):
         h, w_img = bgr.shape[:2]
         
         overlay = bgr.copy()
@@ -237,8 +248,6 @@ class BrainFollowLine(Brain):
         overlay[m_rojo] = (0, 0, 255)
         out = cv2.addWeighted(overlay, 0.3, bgr, 0.7, 0)
         
-        if junc_y: cv2.line(out, (0, junc_y), (w_img, junc_y), (0, 200, 255) if junc_y >= h*self.JUNCTION_Y_FRAC else (120, 120, 120), 1)
-        cv2.line(out, (0, int(h*self.JUNCTION_Y_FRAC)), (w_img, int(h*self.JUNCTION_Y_FRAC)), (60, 60, 60), 1)
         cv2.line(out, (0, h - self.FRANJA_ERROR), (w_img, h - self.FRANJA_ERROR), (180, 180, 180), 1)
         
         for e in ext:
@@ -306,13 +315,26 @@ class BrainFollowLine(Brain):
         flecha_logica = self.arrow_cache if self.arrow_ttl_left > 0 else None
 
         error = self.error_seguimiento(m_lin)
-        junc_y = self.junction_y(m_lin) if len(salidas) >= 2 else None
+        
+        # ---------------------------------------------------------------------------------
+        # DETECCIÓN DE CRUCE INMINENTE (Cruces en 'T' y en 'Y')
+        # ---------------------------------------------------------------------------------
+        cruce_inminente = False
+        if len(salidas) >= 2:
+            junc_y = self.junction_y(m_lin)
+            if junc_y is not None and junc_y >= bgr.shape[0] * self.JUNCTION_Y_FRAC:
+                cruce_inminente = True
+            else:
+                for s in salidas:
+                    if s['lado'] in ('izquierda', 'derecha') and s['punto'][1] >= bgr.shape[0] * 0.60:
+                        cruce_inminente = True
+                        break
         
         salida_elegida = self.elegir_salida(extremos, flecha_logica) if len(salidas) >= 2 else None
         v_cmd, w_cmd, estado = self.NO_FORWARD, self.NO_TURN, ""
 
         # =================================================================
-        # 1. MÁQUINA DE ESTADOS: EVASIÓN CON REINTEGRACIÓN EN CURVA
+        # 1. MÁQUINA DE ESTADOS: EVASIÓN
         # =================================================================
         if min_front < self.DIST_FRONTAL_OBST and not self.avoiding:
             self.avoiding, self.avoid_ticks, self.prev_error = True, 0, None
@@ -320,16 +342,14 @@ class BrainFollowLine(Brain):
         if self.avoiding:
             self.avoid_ticks += 1
             
-            # Sale de la evasión cuando detecta la línea, pero SIN forzar self.last_error
-            # Dejamos que el controlador PD lea el error real de la cámara.
             if error is not None and min_front > self.DIST_FRENTE_LIBRE and self.avoid_ticks > self.AVOID_TICKS_MIN:
                 self.avoiding, estado = False, 'POST-AVOID'
+                # CLAVE: Memorizamos que venimos de la caja para activar el "Gancho de Reintegración"
+                self.last_error = 1.0 
             elif min_front < self.DIST_FRONTAL_OBST:
                 v_cmd, w_cmd, estado = 0.0, -1.0, 'AVOID-FRONT' 
             elif min_left > 0.5:
-                # AQUÍ ESTÁ LA MAGIA: Arco suave en lugar de pivotar en el sitio
-                # Esto obliga al robot a morder la línea en diagonal.
-                v_cmd, w_cmd, estado = 0.12, 0.5, 'AVOID-CORNER' 
+                v_cmd, w_cmd, estado = 0.12, 0.6, 'AVOID-CORNER' 
             else:
                 w_cmd = max(-1.0, min(1.0, -2.5 * (self.DIST_OBJETIVO_PARED - min_left)))
                 v_cmd, estado = 0.15, 'AVOID-WALL'              
@@ -337,7 +357,7 @@ class BrainFollowLine(Brain):
         # =================================================================
         # 2. CRUCE INMINENTE 
         # =================================================================
-        elif len(salidas) >= 2 and junc_y is not None and junc_y >= bgr.shape[0] * self.JUNCTION_Y_FRAC:
+        elif cruce_inminente:
             if salida_elegida:
                 err_x = (salida_elegida['punto'][0] - bgr.shape[1] / 2.0) / (bgr.shape[1] / 2.0)
                 w_cmd = max(-1.0, min(1.0, -self.CRUCE_KP * err_x))
@@ -348,23 +368,32 @@ class BrainFollowLine(Brain):
                 estado = 'CRUCE -> PD'
                 
         # =================================================================
-        # 3. SEGUIMIENTO NORMAL
+        # 3. SEGUIMIENTO NORMAL CON "GANCHO DE REINTEGRACIÓN"
         # =================================================================
         elif error is not None:
-            if abs(error) > 0.10: self.last_error = error
-            v_cmd, w_cmd = self.control_pd(error)
-            estado = 'FOLLOW'
-            
+            # Actualizamos la memoria normal solo si la línea no está completamente centrada/frontal
+            if abs(error) > 0.15: 
+                self.last_error = error
+                
+            # GANCHO DE REINTEGRACIÓN NATURAL: 
+            # Si el robot llega frontal a la línea (error muy pequeño) pero venimos de evadir
+            # (last_error == 1.0), forzamos un giro de "enganche" a la derecha para no cruzarla.
+            if abs(error) < 0.35 and self.last_error == 1.0:
+                v_cmd, w_cmd, estado = 0.10, -0.8, 'REINTEGRANDO'
+            else:
+                v_cmd, w_cmd = self.control_pd(error)
+                estado = 'FOLLOW'
+                
         # =================================================================
         # 4. BÚSQUEDA 
         # =================================================================
         else:
             self.prev_error = None
-            v_cmd, w_cmd, estado = self.SLOW_FORWARD, (-0.6 if self.last_error > 0 else 0.6), 'BUSCAR'
+            v_cmd, w_cmd, estado = self.SLOW_FORWARD, (-0.8 if self.last_error > 0 else 0.8), 'BUSCAR'
 
         self.move(v_cmd, w_cmd)
         
-        out = self.dibujar_overlay(bgr, m_lin, m_rojo, extremos, salida_elegida, flecha_visual, flecha_logica, marca_actual, error, v_cmd, w_cmd, estado, junc_y)
+        out = self.dibujar_overlay(bgr, m_lin, m_rojo, extremos, salida_elegida, flecha_visual, flecha_logica, marca_actual, error, v_cmd, w_cmd, estado)
         cv2.imshow('Stage Camera Image', out)
         cv2.waitKey(1)
 
