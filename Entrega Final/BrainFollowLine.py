@@ -62,17 +62,69 @@ def entrenar_qda_linea():
     return QuadraticDiscriminantAnalysis(reg_param=0.01).fit(X, y)
 
 
+def _filtrar_componentes(mask, area_min=80):
+    mask = mask.astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+
+    out = np.zeros_like(mask, dtype=np.uint8)
+
+    for i in range(1, n):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area >= area_min:
+            out[labels == i] = 255
+
+    return out > 0
+
+
 def segmentar_qda(clf, bgr):
-    """Devuelve mascaras booleanas para linea azul y objetos rojos."""
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    pred = clf.predict(_features_pixel(rgb)).reshape(rgb.shape[:2])
-    m_lin = (pred == 2).astype(np.uint8) * 255
-    m_lin = cv2.morphologyEx(m_lin, cv2.MORPH_OPEN,  _KERNEL_3, iterations=1)
-    m_lin = cv2.morphologyEx(m_lin, cv2.MORPH_CLOSE, _KERNEL_3, iterations=3)
-    m_mar = (pred == 1).astype(np.uint8) * 255
-    m_mar = cv2.morphologyEx(m_mar, cv2.MORPH_OPEN,  _KERNEL_3, iterations=1)
-    m_mar = cv2.morphologyEx(m_mar, cv2.MORPH_CLOSE, _KERNEL_3, iterations=2)
-    return m_lin > 0, m_mar > 0
+    """
+    Segmentacion para robot real.
+    Ignora el QDA porque fue entrenado con imagenes del simulador.
+    Devuelve:
+      m_lin  -> mascara de linea azul
+      m_mar  -> mascara de flechas/marcas rojas o magenta
+    """
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+
+    # LINEA AZUL REAL
+    # Ajustar si hace falta: H aprox azul entre 90 y 130
+    azul_lo = np.array([90, 60, 40], dtype=np.uint8)
+    azul_hi = np.array([130, 255, 255], dtype=np.uint8)
+
+    m_lin = cv2.inRange(hsv, azul_lo, azul_hi)
+
+    # ROJO / MAGENTA PARA FLECHAS Y MARCAS
+    rojo_lo1 = np.array([0, 80, 50], dtype=np.uint8)
+    rojo_hi1 = np.array([12, 255, 255], dtype=np.uint8)
+
+    rojo_lo2 = np.array([165, 80, 50], dtype=np.uint8)
+    rojo_hi2 = np.array([179, 255, 255], dtype=np.uint8)
+
+    # Por si las marcas salen violetas/magenta en la camara real
+    mag_lo = np.array([130, 50, 40], dtype=np.uint8)
+    mag_hi = np.array([165, 255, 255], dtype=np.uint8)
+
+    m_mar = (
+        cv2.inRange(hsv, rojo_lo1, rojo_hi1) |
+        cv2.inRange(hsv, rojo_lo2, rojo_hi2) |
+        cv2.inRange(hsv, mag_lo, mag_hi)
+    )
+
+    # Limpieza morfologica
+    kernel3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    kernel5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+
+    m_lin = cv2.morphologyEx(m_lin, cv2.MORPH_OPEN, kernel3, iterations=1)
+    m_lin = cv2.morphologyEx(m_lin, cv2.MORPH_CLOSE, kernel5, iterations=2)
+
+    m_mar = cv2.morphologyEx(m_mar, cv2.MORPH_OPEN, kernel3, iterations=1)
+    m_mar = cv2.morphologyEx(m_mar, cv2.MORPH_CLOSE, kernel3, iterations=1)
+
+    # Quitar puntitos chicos del suelo
+    m_lin = _filtrar_componentes(m_lin, area_min=250)
+    m_mar = _filtrar_componentes(m_mar, area_min=120)
+
+    return m_lin, m_mar
 
 
 def _silueta_y_descriptor(bgr, area_min=80):
