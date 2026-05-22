@@ -189,35 +189,35 @@ class BrainFollowLine(Brain):
     AVOID_FLAG            = 1.0
     POST_AVOID_GRACE      = 60
 
-def setup(self):
-    print('Cargando modelos QDA y LDA...')
-    self.clf_qda = entrenar_qda_linea()
-    self.clf_lda, self.rangos_marcas = entrenar_lda_marcas()
-    print('Listo. Todo preparado para la entrega final.')
+    def setup(self):
+        print('Cargando modelos QDA y LDA...')
+        self.clf_qda = entrenar_qda_linea()
+        self.clf_lda, self.rangos_marcas = entrenar_lda_marcas()
+        print('Listo. Todo preparado para la entrega final.')
 
-    # CAMARA REAL
-    self.capture = cv2.VideoCapture(0)
+        # CAMARA REAL
+        self.capture = cv2.VideoCapture(0)
 
-    # Resolucion recomendada para no ir lentisimo
-    self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
-    self.capture.set(cv2.CAP_PROP_FPS, 30)
+        # Resolucion recomendada para no ir lentisimo
+        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
+        self.capture.set(cv2.CAP_PROP_FPS, 30)
 
-    if not self.capture.isOpened():
-        print("ERROR: no se pudo abrir la camara real")
-    else:
-        print("Camara real abierta correctamente")
+        if not self.capture.isOpened():
+            print("ERROR: no se pudo abrir la camara real")
+        else:
+            print("Camara real abierta correctamente")
 
-    self.prev_error = None
-    self.last_error = 0.0
-    self.avoiding = False
-    self.avoid_ticks = 0
-    self.post_avoid_grace = 0
-    self.arrow_cache = None
-    self.arrow_ttl_left = 0
-    self.last_marca = None
-    self.cooldown_marca = 0
-    self.marcas_vistas = []
+        self.prev_error = None
+        self.last_error = 0.0
+        self.avoiding = False
+        self.avoid_ticks = 0
+        self.post_avoid_grace = 0
+        self.arrow_cache = None
+        self.arrow_ttl_left = 0
+        self.last_marca = None
+        self.cooldown_marca = 0
+        self.marcas_vistas = []
 
     def destroy(self):
         self.move(0.0, 0.0)
