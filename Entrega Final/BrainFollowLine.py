@@ -13,9 +13,6 @@ from sklearn.discriminant_analysis import (
 )
 
 
-# ======================================================================
-# Rutas y constantes precomputadas
-# ======================================================================
 _AQUI = os.path.dirname(os.path.abspath(__file__))
 RUTA_IMG_ORIGINAL   = os.path.join(_AQUI, 'imagen_original.png')
 RUTA_IMG_MARCADA    = os.path.join(_AQUI, 'imagen_marcada.png')
@@ -30,10 +27,12 @@ _KERNEL_3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 _RX_MARCA = re.compile(r'^([a-z]+)[-_]\d+\.png$', re.IGNORECASE)
 
 
-# ======================================================================
-# Vision: QDA (linea) y LDA (marcas)
-# ======================================================================
+def _clamp(valor, minimo=-1.0, maximo=1.0):
+    return max(minimo, min(maximo, valor))
+
+
 def _features_pixel(rgb):
+    """Convierte pixeles RGB a rasgos de color para clasificacion."""
     if rgb.ndim == 3:
         rgb = rgb.reshape(-1, 3)
     img = rgb.reshape(1, -1, 3).astype(np.uint8)
@@ -48,6 +47,7 @@ def _features_pixel(rgb):
 
 
 def entrenar_qda_linea():
+    """Entrena el clasificador de fondo, marca roja y linea azul."""
     orig = cv2.cvtColor(cv2.imread(RUTA_IMG_ORIGINAL), cv2.COLOR_BGR2RGB)
     marc = cv2.cvtColor(cv2.imread(RUTA_IMG_MARCADA),  cv2.COLOR_BGR2RGB)
     m_marca = (marc[..., 0] == 255) & (marc[..., 1] == 0)   & (marc[..., 2] == 0)
@@ -63,6 +63,7 @@ def entrenar_qda_linea():
 
 
 def segmentar_qda(clf, bgr):
+    """Devuelve mascaras booleanas para linea azul y objetos rojos."""
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     pred = clf.predict(_features_pixel(rgb)).reshape(rgb.shape[:2])
     m_lin = (pred == 2).astype(np.uint8) * 255
@@ -75,7 +76,7 @@ def segmentar_qda(clf, bgr):
 
 
 def _silueta_y_descriptor(bgr, area_min=80):
-    """Silueta roja + descriptor 11-D (7 log-Hu + 4 ratios) + bbox."""
+    """Extrae descriptor de forma de la mayor silueta roja."""
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     m = (cv2.inRange(hsv, _HSV_ROJO_LO1, _HSV_ROJO_HI1) |
          cv2.inRange(hsv, _HSV_ROJO_LO2, _HSV_ROJO_HI2))
@@ -115,6 +116,7 @@ def _silueta_y_descriptor(bgr, area_min=80):
 
 
 def entrenar_lda_marcas():
+    """Entrena el clasificador de marcas a partir de capturas etiquetadas."""
     X, y, rangos_raw = [], [], {c: [] for c in range(len(CLASES_MARCAS))}
     for f in sorted(glob.glob(os.path.join(RUTA_DATASET_MARCAS, '*.png'))):
         m = _RX_MARCA.match(os.path.basename(f))
@@ -136,6 +138,7 @@ def entrenar_lda_marcas():
 
 
 def predecir_marca(bgr, clf, rangos, area_min=300, umbral_conf=0.55):
+    """Clasifica una marca roja si su forma y confianza son consistentes."""
     out = _silueta_y_descriptor(bgr, area_min)
     if not out:
         return None
@@ -155,46 +158,20 @@ def predecir_marca(bgr, clf, rangos, area_min=300, umbral_conf=0.55):
     return CLASES_MARCAS[pred], conf, bbox
 
 
-# ======================================================================
-# Cerebro principal
-# ======================================================================
 class BrainFollowLine(Brain):
-    """Sigue linea azul + arrows + marcas + esquiva obstaculo.
+    """Cerebro que sigue la linea, interpreta flechas/marcas y evita obstaculos."""
 
-    Estados (orden de prioridad):
-      AVOID -> esquiva + wrap del obstaculo (estado machine de Practica 1)
-      POST-AVOID grace -> CRUCE desactivado N frames tras evasion (evita
-                          que la geometria caotica post-evasion dispare
-                          un CRUCE con extremo "hacia atras")
-      CRUCE -> bifurcacion imminente + flecha elige el ramal
-      FOLLOW -> PD sobre franja inferior (siempre que haya linea)
-      BUSCAR -> spin EN SITIO (v=0) hacia ultimo sentido conocido
-
-    Reintegracion estilo Practica 1:
-      - Al salir de AVOID se inyecta last_error=+1 y se hace return sin
-        moverse ese frame.
-      - Durante POST-AVOID grace solo se usa PD/BUSCAR (CRUCE off) -> el
-        PD centra la linea SIEMPRE en la franja inferior, no le importa
-        si hay extremos laterales.
-      - BUSCAR gira EN SITIO (v=0): no avanza y por eso no cruza la
-        linea perpendicular ni se va hacia atras.
-    """
-
-    # ---- Velocidades y control (formula PD igualada a Practica 1) ----
-    # PD: w = -KP * error      (sin termino D, sin saturacion previa)
-    # v : v = max(SLOW, FULL - |error|)
-    # Misma respuesta que la P1 que ya te funcionaba: curva moderada
-    # a errores medios, pivote suave a errores altos.
+    # Velocidades y control de seguimiento.
     SLOW_FORWARD, FULL_FORWARD = 0.05, 0.40
-    KP                    = 1.2     # ganancia P (P1: 1.2)
+    KP                    = 1.2
     CRUCE_KP              = 1.6
 
-    # ---- Percepcion ----
+    # Parametros de percepcion.
     FRANJA_ERROR, BANDA_BORDE = 40, 4
     MIN_SEGMENTO, FUSION_GAP  = 5, 8
     JUNCTION_Y_FRAC           = 0.75
     JUNCTION_MIN_RUN          = 3
-    SIDE_EXIT_Y_FRAC          = 0.80   # antes 0.60: mas estricto -> menos falsos
+    SIDE_EXIT_Y_FRAC          = 0.80
     AREA_MIN_FLECHA           = 120
     FLECHA_CIRC_MAX           = 0.35
     FLECHA_ELONG_MIN          = 3.0
@@ -202,19 +179,16 @@ class BrainFollowLine(Brain):
     MARCA_AREA_MIN            = 300
     MARCA_COOLDOWN, ARROW_TTL = 25, 300
 
-    # ---- Evasion (igualada a Practica 1) ----
+    # Parametros de evasion de obstaculos.
     DIST_FRONTAL_OBST     = 0.40
     DIST_FRENTE_LIBRE     = 0.40
     DIST_OBJETIVO_PARED   = 0.30
     AVOID_TICKS_MIN       = 40
-    AVOID_TICKS_MAX       = 250    # tope absoluto -> exit aunque no centre linea
-    AVOID_EXIT_ERR_MAX    = 0.50   # |error| < esto para salir tangencial
+    AVOID_TICKS_MAX       = 250
+    AVOID_EXIT_ERR_MAX    = 0.50
     AVOID_FLAG            = 1.0
-    POST_AVOID_GRACE      = 60     # frames sin CRUCE tras evasion (~6 s)
+    POST_AVOID_GRACE      = 60
 
-    # ==================================================================
-    # Ciclo de vida
-    # ==================================================================
     def setup(self):
         print('Cargando modelos QDA y LDA...')
         self.clf_qda = entrenar_qda_linea()
@@ -239,10 +213,8 @@ class BrainFollowLine(Brain):
                 print('  %d. %s (%.2f) en img=(%d,%d)' % (i, c, p, x, y))
         cv2.destroyAllWindows()
 
-    # ==================================================================
-    # Percepcion
-    # ==================================================================
     def detectar_extremos(self, m_lin):
+        """Busca entradas y salidas de la linea en los bordes de la imagen."""
         h, w = m_lin.shape
         b, cx, cy = self.BANDA_BORDE, w / 2.0, h / 2.0
         bordes = (
@@ -277,6 +249,7 @@ class BrainFollowLine(Brain):
         return out
 
     def junction_y(self, m_lin):
+        """Localiza la fila inferior donde aparecen dos segmentos de linea."""
         min_run = self.JUNCTION_MIN_RUN
         for y in range(m_lin.shape[0] - 1, -1, -1):
             d = np.diff(np.concatenate([[0], m_lin[y].astype(np.uint8), [0]]))
@@ -291,6 +264,7 @@ class BrainFollowLine(Brain):
         return None
 
     def detectar_flecha(self, m_rojo):
+        """Detecta una flecha roja alargada y estima su direccion."""
         if not m_rojo.any():
             return None
         cnts, _ = cv2.findContours(m_rojo.astype(np.uint8),
@@ -342,10 +316,7 @@ class BrainFollowLine(Brain):
         }
 
     def elegir_salida(self, extremos, flecha):
-        """Extremo (no-entrada) cuyo angulo coincide mejor con la flecha.
-        Sin filtro de "preferir arriba" -> respeta la direccion de la
-        flecha aunque apunte a un lateral inferior.
-        """
+        """Elige la salida cuyo angulo coincide mejor con la flecha."""
         salidas = [e for e in extremos if not e['es_entrada']]
         if not salidas:
             return None
@@ -353,11 +324,76 @@ class BrainFollowLine(Brain):
         return min(salidas,
                    key=lambda e: abs((e['angulo'] - ref + 180) % 360 - 180))
 
-    # ==================================================================
-    # Overlay
-    # ==================================================================
+    def leer_distancias(self):
+        """Lee sensores de rango; si fallan, devuelve distancias seguras."""
+        try:
+            min_front = min(self.robot.range[i].distance() for i in range(2, 6))
+            min_left = min(self.robot.range[i].distance() for i in range(0, 3))
+        except Exception:
+            min_front, min_left = 99.0, 99.0
+        return min_front, min_left
+
+    def actualizar_temporizadores(self):
+        if self.cooldown_marca:
+            self.cooldown_marca -= 1
+        if self.post_avoid_grace:
+            self.post_avoid_grace -= 1
+
+    def calcular_error_linea(self, m_lin, cx_img):
+        """Calcula el error horizontal de la linea en la franja inferior."""
+        franja = m_lin[-self.FRANJA_ERROR:, :].astype(np.uint8)
+        M = cv2.moments(franja, binaryImage=True)
+        if M['m00'] < 1:
+            return None
+        return float((M['m10'] / M['m00'] - cx_img) / cx_img)
+
+    def procesar_rojo(self, bgr, m_rojo):
+        """Distingue entre marca conocida y flecha en la zona roja."""
+        marca_actual = None
+        flecha_visual = None
+        if m_rojo.any():
+            marca_actual = predecir_marca(bgr, self.clf_lda,
+                                          self.rangos_marcas,
+                                          self.MARCA_AREA_MIN)
+            if marca_actual is None:
+                flecha_visual = self.detectar_flecha(m_rojo)
+            elif self.cooldown_marca == 0 and marca_actual[0] != self.last_marca:
+                clase, conf, bbox = marca_actual
+                cxm, cym = bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2
+                print('>>> MARCA: %s (%.2f) en img=(%d,%d)'
+                      % (clase, conf, cxm, cym))
+                self.marcas_vistas.append((clase, conf, cxm, cym))
+                self.last_marca = clase
+                self.cooldown_marca = self.MARCA_COOLDOWN
+        return marca_actual, flecha_visual
+
+    def actualizar_memoria_flecha(self, flecha_visual):
+        if flecha_visual:
+            self.arrow_cache = flecha_visual
+            self.arrow_ttl_left = self.ARROW_TTL
+        elif self.arrow_ttl_left > 0:
+            self.arrow_ttl_left -= 1
+        return self.arrow_cache if self.arrow_ttl_left > 0 else None
+
+    def hay_cruce_inminente(self, m_lin, salidas, h_img):
+        """Detecta si hay una bifurcacion cercana."""
+        if self.post_avoid_grace != 0 or len(salidas) < 2:
+            return False
+
+        jy = self.junction_y(m_lin)
+        if jy is not None and jy >= h_img * self.JUNCTION_Y_FRAC:
+            return True
+
+        lim_y = h_img * self.SIDE_EXIT_Y_FRAC
+        for salida in salidas:
+            if (salida['lado'] in ('izquierda', 'derecha')
+                    and salida['punto'][1] >= lim_y):
+                return True
+        return False
+
     def overlay(self, bgr, m_lin, m_rojo, ext, sel, flecha, marca,
                 err, v, w, estado):
+        """Dibuja informacion de depuracion sobre la imagen de camara."""
         h, wi = bgr.shape[:2]
         ov = bgr.copy()
         ov[m_lin]  = (255, 0, 0)
@@ -413,9 +449,6 @@ class BrainFollowLine(Brain):
                         0.4, (255, 255, 255), 1, cv2.LINE_AA)
         return out
 
-    # ==================================================================
-    # Bucle principal
-    # ==================================================================
     def step(self):
         bgr = self.robot.getImage()
         if bgr is None:
@@ -426,70 +459,23 @@ class BrainFollowLine(Brain):
         cx_img = w_img / 2.0
         m_lin, m_rojo = segmentar_qda(self.clf_qda, bgr)
 
-        try:
-            min_front = min(self.robot.range[i].distance() for i in range(2, 6))
-            min_left  = min(self.robot.range[i].distance() for i in range(0, 3))
-        except Exception:
-            min_front, min_left = 99.0, 99.0
-
-        if self.cooldown_marca:
-            self.cooldown_marca -= 1
-        if self.post_avoid_grace:
-            self.post_avoid_grace -= 1
+        min_front, min_left = self.leer_distancias()
+        self.actualizar_temporizadores()
 
         extremos = self.detectar_extremos(m_lin)
         salidas  = [e for e in extremos if not e['es_entrada']]
 
-        franja = m_lin[-self.FRANJA_ERROR:, :].astype(np.uint8)
-        M = cv2.moments(franja, binaryImage=True)
-        error = float((M['m10'] / M['m00'] - cx_img) / cx_img) \
-                if M['m00'] >= 1 else None
-
-        # --- Percepcion roja ---
-        marca_actual = None
-        flecha_visual = None
-        if m_rojo.any():
-            marca_actual = predecir_marca(bgr, self.clf_lda,
-                                          self.rangos_marcas,
-                                          self.MARCA_AREA_MIN)
-            if marca_actual is None:
-                flecha_visual = self.detectar_flecha(m_rojo)
-            elif self.cooldown_marca == 0 and marca_actual[0] != self.last_marca:
-                clase, conf, bbox = marca_actual
-                cxm, cym = bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2
-                print('>>> MARCA: %s (%.2f) en img=(%d,%d)'
-                      % (clase, conf, cxm, cym))
-                self.marcas_vistas.append((clase, conf, cxm, cym))
-                self.last_marca = clase
-                self.cooldown_marca = self.MARCA_COOLDOWN
-
-        if flecha_visual:
-            self.arrow_cache    = flecha_visual
-            self.arrow_ttl_left = self.ARROW_TTL
-        elif self.arrow_ttl_left > 0:
-            self.arrow_ttl_left -= 1
-        flecha_logica = self.arrow_cache if self.arrow_ttl_left > 0 else None
-
-        # --- Cruce inminente (DESACTIVADO durante POST-AVOID grace) ---
-        cruce_inminente = False
-        if self.post_avoid_grace == 0 and len(salidas) >= 2:
-            jy = self.junction_y(m_lin)
-            if jy is not None and jy >= h_img * self.JUNCTION_Y_FRAC:
-                cruce_inminente = True
-            else:
-                lim_y = h_img * self.SIDE_EXIT_Y_FRAC
-                for s in salidas:
-                    if s['lado'] in ('izquierda', 'derecha') \
-                            and s['punto'][1] >= lim_y:
-                        cruce_inminente = True
-                        break
+        error = self.calcular_error_linea(m_lin, cx_img)
+        marca_actual, flecha_visual = self.procesar_rojo(bgr, m_rojo)
+        flecha_logica = self.actualizar_memoria_flecha(flecha_visual)
+        cruce_inminente = self.hay_cruce_inminente(m_lin, salidas, h_img)
 
         salida_elegida = (self.elegir_salida(extremos, flecha_logica)
                           if len(salidas) >= 2 else None)
 
         v_cmd, w_cmd, estado = 0.0, 0.0, ''
 
-        # ============== 1) EVASION (igualada a Practica 1) ==============
+        # Prioridad 1: evasion de obstaculos.
         if min_front < self.DIST_FRONTAL_OBST and not self.avoiding:
             self.avoiding   = True
             self.avoid_ticks = 0
@@ -498,10 +484,7 @@ class BrainFollowLine(Brain):
         if self.avoiding:
             self.avoid_ticks += 1
 
-            # Salida tangencial: requiere linea visible Y CENTRADA (|err|<0.5).
-            # Asi PD entra con error moderado y CURVA hacia la linea en vez
-            # de pivotar al verla apenas en el borde de la franja.
-            # Tope absoluto AVOID_TICKS_MAX por seguridad.
+            # Sale de la evasion cuando la linea vuelve centrada o vence el tope.
             linea_centrada = (error is not None
                               and abs(error) < self.AVOID_EXIT_ERR_MAX)
             timeout = self.avoid_ticks > self.AVOID_TICKS_MAX
@@ -521,44 +504,34 @@ class BrainFollowLine(Brain):
                 cv2.waitKey(1)
                 return
 
-            # Estado interno de evasion (igual que Practica 1)
             if min_front < self.DIST_FRONTAL_OBST:
                 v_cmd, w_cmd, estado = 0.0, -1.0, 'AVOID-FRONT'
             elif min_left > 0.5:
-                # CAMBIO: como Practica 1, no avanza durante CORNER
                 v_cmd, w_cmd, estado = 0.0, 1.0, 'AVOID-CORNER'
             else:
-                w_cmd = max(-1.0, min(1.0,
-                          -2.5 * (self.DIST_OBJETIVO_PARED - min_left)))
+                w_cmd = _clamp(-2.5 * (self.DIST_OBJETIVO_PARED - min_left))
                 v_cmd, estado = 0.15, 'AVOID-WALL'
 
-        # ============== 2) CRUCE INMINENTE ==============
+        # Prioridad 2: elegir ramal en bifurcaciones.
         elif cruce_inminente and salida_elegida is not None:
             err_x = (salida_elegida['punto'][0] - cx_img) / cx_img
-            w_cmd = max(-1.0, min(1.0, -math.tanh(self.CRUCE_KP * err_x)))
-            # Misma formula de velocidad que FOLLOW (P1 style)
+            w_cmd = _clamp(-math.tanh(self.CRUCE_KP * err_x))
             v_cmd = max(0.08, self.FULL_FORWARD - abs(err_x))
             self.last_error = err_x
             self.prev_error = None
             estado = 'CRUCE -> ' + salida_elegida['lado']
 
-        # ============== 3) SIN LINEA: spin EN SITIO (Practica 1) ==============
+        # Prioridad 3: recuperar la linea girando hacia el ultimo error conocido.
         elif error is None:
             self.prev_error = None
             w_cmd = -0.8 if self.last_error > 0 else 0.8
             v_cmd, estado = 0.0, 'BUSCAR (spin)'
 
-        # ============== 4) SEGUIMIENTO PD (formula Practica 1) ==============
+        # Prioridad 4: seguimiento normal de linea.
         else:
-            # Anti-retroceso: no borramos last_error si la linea esta cerca
-            # del centro. Asi mantenemos el sesgo de busqueda si la perdemos.
             if abs(error) > 0.15:
                 self.last_error = error
-            # Formula Practica 1: w = -KP*error,  v = max(SLOW, FULL - |error|)
-            # Tangencial: a |err|=0.3 -> v=0.10 + w=-0.36 -> radio ~28 cm
-            #             a |err|=0.5 -> v=0.05 + w=-0.60 -> radio ~ 8 cm
-            #             a |err|=0.8 -> v=0.05 + w=-0.96 -> casi pivote
-            w_cmd = max(-1.0, min(1.0, -self.KP * error))
+            w_cmd = _clamp(-self.KP * error)
             v_cmd = max(self.SLOW_FORWARD, self.FULL_FORWARD - abs(error))
             estado = ('FOLLOW (grace=%d)' % self.post_avoid_grace
                       if self.post_avoid_grace else 'FOLLOW')
