@@ -189,28 +189,47 @@ class BrainFollowLine(Brain):
     AVOID_FLAG            = 1.0
     POST_AVOID_GRACE      = 60
 
-    def setup(self):
-        print('Cargando modelos QDA y LDA...')
-        self.clf_qda = entrenar_qda_linea()
-        self.clf_lda, self.rangos_marcas = entrenar_lda_marcas()
-        print('Listo. Todo preparado para la entrega final.')
+def setup(self):
+    print('Cargando modelos QDA y LDA...')
+    self.clf_qda = entrenar_qda_linea()
+    self.clf_lda, self.rangos_marcas = entrenar_lda_marcas()
+    print('Listo. Todo preparado para la entrega final.')
 
-        self.prev_error      = None
-        self.last_error      = 0.0
-        self.avoiding        = False
-        self.avoid_ticks     = 0
-        self.post_avoid_grace = 0    # frames con CRUCE desactivado
-        self.arrow_cache     = None
-        self.arrow_ttl_left  = 0
-        self.last_marca      = None
-        self.cooldown_marca  = 0
-        self.marcas_vistas   = []
+    # CAMARA REAL
+    self.capture = cv2.VideoCapture(0)
+
+    # Resolucion recomendada para no ir lentisimo
+    self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
+    self.capture.set(cv2.CAP_PROP_FPS, 30)
+
+    if not self.capture.isOpened():
+        print("ERROR: no se pudo abrir la camara real")
+    else:
+        print("Camara real abierta correctamente")
+
+    self.prev_error = None
+    self.last_error = 0.0
+    self.avoiding = False
+    self.avoid_ticks = 0
+    self.post_avoid_grace = 0
+    self.arrow_cache = None
+    self.arrow_ttl_left = 0
+    self.last_marca = None
+    self.cooldown_marca = 0
+    self.marcas_vistas = []
 
     def destroy(self):
+        self.move(0.0, 0.0)
+
+        if hasattr(self, "capture") and self.capture is not None:
+            self.capture.release()
+
         if self.marcas_vistas:
             print('=== Marcas detectadas ===')
             for i, (c, p, x, y) in enumerate(self.marcas_vistas, 1):
                 print('  %d. %s (%.2f) en img=(%d,%d)' % (i, c, p, x, y))
+
         cv2.destroyAllWindows()
 
     def detectar_extremos(self, m_lin):
@@ -450,14 +469,20 @@ class BrainFollowLine(Brain):
         return out
 
     def step(self):
-        bgr = self.robot.getImage()
-        if bgr is None:
+        ok, bgr = self.capture.read()
+
+        if not ok or bgr is None:
+            print("No se pudo leer frame de la camara")
             self.move(0.0, 0.0)
             return
 
+        bgr = cv2.resize(bgr, (640, 360))
+
         h_img, w_img = bgr.shape[:2]
         cx_img = w_img / 2.0
+
         m_lin, m_rojo = segmentar_qda(self.clf_qda, bgr)
+
 
         min_front, min_left = self.leer_distancias()
         self.actualizar_temporizadores()
