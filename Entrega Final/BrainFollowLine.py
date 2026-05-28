@@ -182,12 +182,10 @@ def predecir_marca(bgr, clf, rangos, area_min=300, umbral_conf=0.55,
     if (bbox[1] + bbox[3]) >= (bgr.shape[0] - 5):
         return None
         
-    # --- ESCUDO MUTUAMENTE EXCLUSIVO ---
-    # La circularidad es el índice 10 del descriptor.
-    # Si la forma es MUY alargada (circ < 0.20) es una flecha y no una marca.
-    # Bajado de 0.45 a 0.20 para que telephone/stairs (mas alargadas)
-    # sigan siendo clasificadas como marca.
-    if feat[10] < 0.20:
+    # --- ESCUDO MUTUAMENTE EXCLUSIVO CORREGIDO ---
+    # Bajado a 0.05 para que no filtre 'stairs'. Stairs tiene un perímetro
+    # enorme por su forma en zig-zag, haciendo que su circularidad sea muy baja.
+    if feat[10] < 0.05:
         return None
 
     probs = clf.predict_proba(feat.reshape(1, -1))[0]
@@ -222,12 +220,12 @@ class BrainFollowLine(Brain):
     SIDE_EXIT_Y_FRAC          = 0.70 # Activamos el cruce un pelín antes para que el robot gire a tiempo
 
     AREA_MIN_FLECHA           = 350
-    MARCA_AREA_MIN            = 900
+    MARCA_AREA_MIN            = 450 # Bajado de 900 a 450 para captar marcas delgadas como 'stairs'
 
     # Filtros para que no confunda flechas con marcas
-    FLECHA_CIRC_MAX           = 0.45 # Límite estricto complementario a las marcas
-    FLECHA_ELONG_MIN          = 2.5  # subido: telephone/stairs NO son tan alargados
-    FLECHA_ASIM_MIN           = 0.30 # subido: telephone/stairs son simetricos
+    FLECHA_CIRC_MAX           = 0.45 
+    FLECHA_ELONG_MIN          = 2.5  
+    FLECHA_ASIM_MIN           = 0.30 
 
     MARCA_UMBRAL_CONF_ALTO    = 0.55
     MARCA_UMBRAL_CONF_BAJO    = 0.35
@@ -236,16 +234,12 @@ class BrainFollowLine(Brain):
     MARCA_COOLDOWN, ARROW_TTL = 25, 300
 
     # ---- Lock de la salida elegida en cruce ----
-    # Una vez decidida la salida durante un cruce, el lock se mantiene
-    # por al menos CRUCE_LOCK_TICKS_MIN frames despues de que el cruce
-    # deje de detectarse. Asi el robot no cambia de opinion a mitad
-    # del giro por culpa de un flicker visual.
     CRUCE_LOCK_TICKS_MIN  = 30
 
-    # Umbrales de evasion alineados con Practica 1 - Control
-    DIST_FRONTAL_OBST     = 0.35   # antes 0.50 (de Practica 1)
-    DIST_FRENTE_LIBRE     = 0.40   # antes 0.45 (de Practica 1)
-    DIST_OBJETIVO_PARED   = 0.30
+    # Umbrales de evasion corregidos
+    DIST_FRONTAL_OBST     = 0.35   
+    DIST_FRENTE_LIBRE     = 0.40   
+    DIST_OBJETIVO_PARED   = 0.35   # Subido levemente para asegurar espacio al rodear
     AVOID_TICKS_MIN       = 40
     AVOID_TICKS_MAX       = 250
     AVOID_EXIT_ERR_MAX    = 0.50
@@ -280,9 +274,6 @@ class BrainFollowLine(Brain):
         self.marcas_vistas    = []
         self._frame_idx       = 0
         self._gui_ok          = True
-
-        # Lock de salida elegida en cruce: una vez fijada por la flecha
-        # se queda ahi hasta que el cruce termine + ticks de gracia.
         self.cruce_salida_lock     = None
         self.cruce_lock_ticks_left = 0
 
@@ -344,7 +335,6 @@ class BrainFollowLine(Brain):
         if area < self.AREA_MIN_FLECHA or len(cnt) < 5: return None
         
         perim = cv2.arcLength(cnt, True)
-        # Validación complementaria a la marca
         if (4.0 * math.pi * area / max(perim * perim, 1e-6)) > self.FLECHA_CIRC_MAX: return None
 
         mask = np.zeros(m_rojo.shape, dtype=np.uint8)
@@ -364,7 +354,6 @@ class BrainFollowLine(Brain):
         L = pmax - pmin
         if L < 5: return None
         
-        # --- LÓGICA DE PUNTA CORREGIDA (Puramente matemática) ---
         franja = 0.25 * L
         pp_pos = proy_p[proy_a > pmax - franja]
         pp_neg = proy_p[proy_a < pmin + franja]
@@ -373,7 +362,6 @@ class BrainFollowLine(Brain):
         max_s = max(s_pos, s_neg)
         if max_s < 1e-3 or abs(s_pos - s_neg) / max_s < self.FLECHA_ASIM_MIN: return None
 
-        # La punta siempre es el lado donde la figura es más ancha
         idx = int(np.argmax(proy_a)) if s_pos > s_neg else int(np.argmin(proy_a))
         px, py = float(pts[idx, 0]), float(pts[idx, 1])
         
@@ -383,13 +371,9 @@ class BrainFollowLine(Brain):
         }
 
     def elegir_salida(self, extremos, flecha):
-        # --- SELECCIÓN DE SALIDA CORREGIDA ---
-        # Se elimina la lógica de los cuadrantes que funcionaba mal.
-        # Ahora elije estrictamente la salida que esté más cerca angularmente de la flecha.
         salidas = [e for e in extremos if not e['es_entrada']]
         if not salidas: return None
         if not flecha:
-            # Si no hay flecha, por defecto elegimos la que apunte hacia adelante (90 grados)
             return min(salidas, key=lambda e: abs((e['angulo'] - 90 + 180) % 360 - 180))
 
         return min(salidas, key=lambda e: abs((e['angulo'] - flecha['angulo'] + 180) % 360 - 180))
@@ -445,10 +429,6 @@ class BrainFollowLine(Brain):
         return self.arrow_cache if self.arrow_ttl_left > 0 else None
 
     def _actualizar_salida_lock(self, extremos):
-        """Si hay un lock activo, lo refresca con la salida ACTUAL del
-        mismo lado mas cercana en X. Si ya no hay ninguna salida con ese
-        lado, conserva la coordenada vieja (no oscila durante el giro).
-        """
         if self.cruce_salida_lock is None:
             return None
         lock = self.cruce_salida_lock
@@ -534,12 +514,6 @@ class BrainFollowLine(Brain):
         flecha_logica = self.actualizar_memoria_flecha(flecha_visual)
         cruce_inminente = self.hay_cruce_inminente(m_lin, salidas, h_img)
 
-        # --- Salida elegida con LOCK ---
-        # Cuando hay cruce inminente y >=2 salidas, COMMIT la decision
-        # con la flecha y refresca el TTL del lock. Mientras el cruce
-        # siga visible, refrescamos la posicion (mismo lado, x mas cerca).
-        # Cuando el cruce ya no se ve, el lock sigue activo CRUCE_LOCK_TICKS_MIN
-        # frames mas para que el robot complete el giro sin reconsiderar.
         if cruce_inminente and len(salidas) >= 2:
             if self.cruce_salida_lock is None:
                 self.cruce_salida_lock = self.elegir_salida(extremos, flecha_logica)
@@ -554,7 +528,6 @@ class BrainFollowLine(Brain):
                 self.cruce_salida_lock = actualizada
             salida_elegida = self.cruce_salida_lock
         elif self.cruce_lock_ticks_left > 0 and self.cruce_salida_lock is not None:
-            # Lock aun activo aunque el cruce ya no se vea
             self.cruce_lock_ticks_left -= 1
             actualizada = self._actualizar_salida_lock(extremos)
             if actualizada is not None:
@@ -577,37 +550,36 @@ class BrainFollowLine(Brain):
 
         if self.avoiding:
             self.avoid_ticks += 1
-            # Condicion de salida tipo Practica 1: linea visible + frente libre
-            # + minimo de ticks (deja al robot rodear bien antes de aceptar).
             found_line = (error is not None)
             timeout    = self.avoid_ticks > self.AVOID_TICKS_MAX
+            
+            # Condición NUEVA: Asegurarnos de que hemos dejado el obstáculo atrás (su pared lateral ya no está)
+            # Esto evita que vea la línea debajo del obstáculo y gire bruscamente chocando.
+            lateral_libre = min_left > 0.45 
+
             if (self.avoid_ticks > self.AVOID_TICKS_MIN
                     and min_front > self.DIST_FRENTE_LIBRE
+                    and lateral_libre
                     and (found_line or timeout)):
                 self.avoiding   = False
-                # Inyectamos last_error = +1.0 para forzar giro a la derecha
-                # cuando pierda la linea al cruzarla (logica de Practica 1).
                 self.last_error = self.AVOID_FLAG
                 self.prev_error = None
                 self.post_avoid_grace = self.POST_AVOID_GRACE
                 self.move(0.0, 0.0)
                 return
 
-            if min_front < self.DIST_FRONTAL_OBST: v_cmd, w_cmd, estado = 0.0, -1.0, 'AVOID-FRONT'
-            elif min_left > 0.5: v_cmd, w_cmd, estado = 0.0, 1.0, 'AVOID-CORNER'
+            if min_front < self.DIST_FRONTAL_OBST: 
+                v_cmd, w_cmd, estado = 0.0, -1.0, 'AVOID-FRONT'
+            elif min_left > 0.5: 
+                # NUEVO: Le damos velocidad de avance (0.15) mientras dobla la esquina para despegarse del obstáculo
+                v_cmd, w_cmd, estado = 0.15, 0.8, 'AVOID-CORNER'
             else:
                 w_cmd = _clamp(-2.5 * (self.DIST_OBJETIVO_PARED - min_left))
                 v_cmd, estado = 0.15, 'AVOID-WALL'
 
-        # --- SEGUIMIENTO DE LÍNEA EN CRUCES CORREGIDO ---
         elif cruce_inminente and salida_elegida is not None:
             err_x = (salida_elegida['punto'][0] - cx_img) / cx_img
-
-            # Giro puro proporcional (sin tanh que lo limitaba). Si el error es grande, el giro es fuerte
             w_cmd = _clamp(-self.CRUCE_KP * err_x)
-
-            # Frenado dinámico: Si el robot tiene que girar muy fuerte, avanza extremadamente lento
-            # para no salirse de la línea por culpa de la inercia física del Pioneer.
             v_cmd = max(self.SLOW_FORWARD, self.FULL_FORWARD * (1.0 - 0.9 * abs(w_cmd)))
 
             self.last_error = err_x
@@ -621,8 +593,6 @@ class BrainFollowLine(Brain):
 
         else:
             if abs(error) > 0.15: self.last_error = error
-            
-            # Frenado dinámico también en el seguimiento recto con control Derivativo para evitar tambaleos
             d_err = 0.0 if self.prev_error is None else (error - self.prev_error)
             self.prev_error = error
             
