@@ -183,10 +183,11 @@ def predecir_marca(bgr, clf, rangos, area_min=300, umbral_conf=0.55,
         return None
         
     # --- ESCUDO MUTUAMENTE EXCLUSIVO ---
-    # Bajado a 0.05: stairs tiene circularidad muy baja (zigzag),
-    # antes 0.20 lo rechazaba. La flecha ya se decide ANTES en
-    # procesar_rojo() con filtros estrictos (elong>=2.5, asim>=0.30).
-    if feat[10] < 0.05:
+    # La circularidad es el índice 10 del descriptor.
+    # Si la forma es MUY alargada (circ < 0.20) es una flecha y no una marca.
+    # Bajado de 0.45 a 0.20 para que telephone/stairs (mas alargadas)
+    # sigan siendo clasificadas como marca.
+    if feat[10] < 0.20:
         return None
 
     probs = clf.predict_proba(feat.reshape(1, -1))[0]
@@ -411,16 +412,6 @@ class BrainFollowLine(Brain):
         if M['m00'] < 1: return None
         return float((M['m10'] / M['m00'] - cx_img) / cx_img)
 
-    def _linea_realmente_abajo(self, m_lin):
-        """True solo si hay linea en los ultimos 20 pixeles inferiores.
-
-        Sirve durante la evasion para no salir prematuramente al ver una
-        linea VIEJA o lejana en la zona alta de la imagen. Solo queremos
-        terminar la evasion cuando ya estamos justo ENCIMA de la linea.
-        """
-        franja_baja = m_lin[-20:, :]
-        return int(franja_baja.sum()) > 200
-
     def _reportar_marca(self, marca):
         if marca is not None and self.cooldown_marca == 0 and marca[0] != self.last_marca:
             clase, conf, bbox = marca
@@ -431,19 +422,15 @@ class BrainFollowLine(Brain):
     def procesar_rojo(self, bgr, m_rojo):
         if not m_rojo.any(): return None, None
 
-        # 1. PRIMERO flecha: filtros estrictos (elong>=2.5, asim>=0.30) -> si
-        #    pasa, ES flecha y no hay duda. Marcas reales no pueden pasarlos.
-        flecha_visual = self.detectar_flecha(m_rojo)
-        if flecha_visual is not None:
-            return None, flecha_visual
-
-        # 2. Si no es flecha, intentar marca con confianza alta
         marca_alta = predecir_marca(bgr, self.clf_lda, self.rangos_marcas, area_min=self.MARCA_AREA_MIN, umbral_conf=self.MARCA_UMBRAL_CONF_ALTO, usar_rangos=self.MARCA_FILTRO_RANGOS)
         if marca_alta is not None:
             self._reportar_marca(marca_alta)
             return marca_alta, None
 
-        # 3. Fallback: marca con confianza baja
+        flecha_visual = self.detectar_flecha(m_rojo)
+        if flecha_visual is not None:
+            return None, flecha_visual
+
         marca_baja = predecir_marca(bgr, self.clf_lda, self.rangos_marcas, area_min=self.MARCA_AREA_MIN, umbral_conf=self.MARCA_UMBRAL_CONF_BAJO, usar_rangos=self.MARCA_FILTRO_RANGOS)
         if marca_baja is not None:
             self._reportar_marca(marca_baja)
@@ -590,11 +577,9 @@ class BrainFollowLine(Brain):
 
         if self.avoiding:
             self.avoid_ticks += 1
-            # Condicion de salida: linea REALMENTE abajo (no una vieja
-            # lejana en la parte alta de la imagen) + frente libre +
-            # minimo de ticks. Asi el robot no abandona la evasion al
-            # ver una linea que esta lejos de el.
-            found_line = self._linea_realmente_abajo(m_lin)
+            # Condicion de salida tipo Practica 1: linea visible + frente libre
+            # + minimo de ticks (deja al robot rodear bien antes de aceptar).
+            found_line = (error is not None)
             timeout    = self.avoid_ticks > self.AVOID_TICKS_MAX
             if (self.avoid_ticks > self.AVOID_TICKS_MIN
                     and min_front > self.DIST_FRENTE_LIBRE
