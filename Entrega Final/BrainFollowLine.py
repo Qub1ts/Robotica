@@ -179,12 +179,16 @@ def predecir_marca(bgr, clf, rangos, area_min=300, umbral_conf=0.55,
     if not out:
         return None
     feat, bbox = out
-    if (bbox[1] + bbox[3]) >= (bgr.shape[0] - 5):
+    x, y, w, h = bbox
+    
+    # --- FILTRO DE BORDES (NUEVO) ---
+    # Rechaza cualquier figura que toque los bordes de la imagen.
+    # Una flecha cortada por el borde pierde su asimetría, burla el filtro
+    # geométrico y confunde a la red neuronal haciéndole creer que es una marca.
+    if x <= 5 or y <= 5 or (x + w) >= (bgr.shape[1] - 5) or (y + h) >= (bgr.shape[0] - 5):
         return None
         
     # --- ESCUDO MUTUAMENTE EXCLUSIVO CORREGIDO ---
-    # Bajado a 0.05 para que no filtre 'stairs'. Stairs tiene un perímetro
-    # enorme por su forma en zig-zag, haciendo que su circularidad sea muy baja.
     if feat[10] < 0.05:
         return None
 
@@ -210,17 +214,17 @@ class BrainFollowLine(Brain):
     # ---- Velocidades y control de seguimiento ----
     SLOW_FORWARD, FULL_FORWARD = 0.08, 0.40
     KP                    = 1.2
-    CRUCE_KP              = 1.8 # Un poco más agresivo para cruces
+    CRUCE_KP              = 1.8 
 
     # ---- Parametros de percepcion ----
     FRANJA_ERROR, BANDA_BORDE = 60, 6
     MIN_SEGMENTO, FUSION_GAP  = 12, 18
     JUNCTION_Y_FRAC           = 0.75
     JUNCTION_MIN_RUN          = 6
-    SIDE_EXIT_Y_FRAC          = 0.70 # Activamos el cruce un pelín antes para que el robot gire a tiempo
+    SIDE_EXIT_Y_FRAC          = 0.70 
 
     AREA_MIN_FLECHA           = 350
-    MARCA_AREA_MIN            = 450 # Bajado de 900 a 450 para captar marcas delgadas como 'stairs'
+    MARCA_AREA_MIN            = 450 
 
     # Filtros para que no confunda flechas con marcas
     FLECHA_CIRC_MAX           = 0.45 
@@ -236,10 +240,10 @@ class BrainFollowLine(Brain):
     # ---- Lock de la salida elegida en cruce ----
     CRUCE_LOCK_TICKS_MIN  = 30
 
-    # Umbrales de evasion corregidos
+    # Umbrales de evasion
     DIST_FRONTAL_OBST     = 0.35   
     DIST_FRENTE_LIBRE     = 0.40   
-    DIST_OBJETIVO_PARED   = 0.35   # Subido levemente para asegurar espacio al rodear
+    DIST_OBJETIVO_PARED   = 0.35   
     AVOID_TICKS_MIN       = 40
     AVOID_TICKS_MAX       = 250
     AVOID_EXIT_ERR_MAX    = 0.50
@@ -406,14 +410,18 @@ class BrainFollowLine(Brain):
     def procesar_rojo(self, bgr, m_rojo):
         if not m_rojo.any(): return None, None
 
+        # --- PRIORIDAD DE FLECHAS (NUEVO ORDEN) ---
+        # Primero evaluamos si es una flecha pura. Como sus reglas matemáticas 
+        # (asimetría, elongación) son deterministas y estrictas, no hay falsos positivos.
+        flecha_visual = self.detectar_flecha(m_rojo)
+        if flecha_visual is not None:
+            return None, flecha_visual
+
+        # Si no pasó los filtros estrictos de la flecha, dejamos que la red LDA opine.
         marca_alta = predecir_marca(bgr, self.clf_lda, self.rangos_marcas, area_min=self.MARCA_AREA_MIN, umbral_conf=self.MARCA_UMBRAL_CONF_ALTO, usar_rangos=self.MARCA_FILTRO_RANGOS)
         if marca_alta is not None:
             self._reportar_marca(marca_alta)
             return marca_alta, None
-
-        flecha_visual = self.detectar_flecha(m_rojo)
-        if flecha_visual is not None:
-            return None, flecha_visual
 
         marca_baja = predecir_marca(bgr, self.clf_lda, self.rangos_marcas, area_min=self.MARCA_AREA_MIN, umbral_conf=self.MARCA_UMBRAL_CONF_BAJO, usar_rangos=self.MARCA_FILTRO_RANGOS)
         if marca_baja is not None:
@@ -552,9 +560,6 @@ class BrainFollowLine(Brain):
             self.avoid_ticks += 1
             found_line = (error is not None)
             timeout    = self.avoid_ticks > self.AVOID_TICKS_MAX
-            
-            # Condición NUEVA: Asegurarnos de que hemos dejado el obstáculo atrás (su pared lateral ya no está)
-            # Esto evita que vea la línea debajo del obstáculo y gire bruscamente chocando.
             lateral_libre = min_left > 0.45 
 
             if (self.avoid_ticks > self.AVOID_TICKS_MIN
@@ -571,7 +576,6 @@ class BrainFollowLine(Brain):
             if min_front < self.DIST_FRONTAL_OBST: 
                 v_cmd, w_cmd, estado = 0.0, -1.0, 'AVOID-FRONT'
             elif min_left > 0.5: 
-                # NUEVO: Le damos velocidad de avance (0.15) mientras dobla la esquina para despegarse del obstáculo
                 v_cmd, w_cmd, estado = 0.15, 0.8, 'AVOID-CORNER'
             else:
                 w_cmd = _clamp(-2.5 * (self.DIST_OBJETIVO_PARED - min_left))
