@@ -238,19 +238,19 @@ class BrainFollowLine(Brain):
     # ---- Parametros de evasion ----
     DIST_FRONTAL_OBST     = 0.35
     DIST_FRENTE_LIBRE     = 0.40
-    DIST_OBJETIVO_PARED   = 0.30   # mantiene 30 cm de la caja (no tan cerca)
-    AVOID_TICKS_MIN       = 80     # asegura rodear cajas largas
+    DIST_OBJETIVO_PARED   = 0.40   # subido: el robot se ABRE mas del objeto (40 cm)
+    AVOID_TICKS_MIN       = 80
     AVOID_TICKS_MAX       = 250
-    AVOID_FLAG            = 1.0
+    AVOID_FLAG            = -1.0   # negativo: tras salir, BUSCAR gira a IZQUIERDA
     POST_AVOID_GRACE      = 60
     PRINT_EVERY_N_FRAMES  = 15
 
-    # Umbrales laterales del sonar para detectar fin de pared / esquina
-    AVOID_CORNER_LEFT     = 0.55   # bajado: si min_left>0.55 -> esquina (no 0.60)
-    AVOID_EXIT_LEFT       = 0.55   # bajado: salida cuando lateral despejado
+    # Umbrales laterales del sonar
+    AVOID_CORNER_LEFT     = 0.60   # subido: necesita mas despeje para curvar (objeto mas lejos)
+    AVOID_EXIT_LEFT       = 0.60   # subido: solo sale cuando lateral REALMENTE libre
 
     # Control proporcional lateral
-    AVOID_WALL_GAIN       = 2.5    # bajado: control suave para no oscilar
+    AVOID_WALL_GAIN       = 2.5
 
     def setup(self):
         print('Cargando modelos QDA y LDA...')
@@ -400,6 +400,16 @@ class BrainFollowLine(Brain):
         M = cv2.moments(franja, binaryImage=True)
         if M['m00'] < 1: return None
         return float((M['m10'] / M['m00'] - cx_img) / cx_img)
+
+    def _linea_cerca(self, m_lin):
+        """True solo si hay linea en los ultimos 20 pixeles INFERIORES.
+
+        Se usa SOLO durante la evasion como condicion de salida: evita
+        que el robot abandone la maniobra al ver una linea LEJANA en la
+        parte alta de la imagen (que aun no esta debajo de el).
+        """
+        franja_baja = m_lin[-20:, :]
+        return int(franja_baja.sum()) > 200
 
     def _reportar_marca(self, marca):
         if marca is not None and self.cooldown_marca == 0 and marca[0] != self.last_marca:
@@ -556,11 +566,14 @@ class BrainFollowLine(Brain):
 
         if self.avoiding:
             self.avoid_ticks += 1
-            found_line = (error is not None)
+            # found_line ESTRICTO: solo cuenta si la linea esta REALMENTE
+            # abajo (cerca del robot), no una lejana en la parte alta.
+            # Asi el robot no abandona la evasion prematuramente.
+            found_line = self._linea_cerca(m_lin)
             timeout    = self.avoid_ticks > self.AVOID_TICKS_MAX
 
             # Condicion de salida: caja terminada (lateral libre)
-            # + frente libre + minimo de ticks + linea visible o timeout
+            # + frente libre + minimo de ticks + linea cerca o timeout
             lateral_libre = min_left > self.AVOID_EXIT_LEFT
 
             if (self.avoid_ticks > self.AVOID_TICKS_MIN
@@ -568,26 +581,26 @@ class BrainFollowLine(Brain):
                     and lateral_libre
                     and (found_line or timeout)):
                 self.avoiding   = False
-                self.last_error = self.AVOID_FLAG  # forzar giro derecha al buscar
+                # AVOID_FLAG = -1.0 -> en BUSCAR girara IZQUIERDA para
+                # encontrar la linea (que quedo a la izq al rodear por der).
+                self.last_error = self.AVOID_FLAG
                 self.prev_error = None
                 self.post_avoid_grace = self.POST_AVOID_GRACE
                 self.move(0.0, 0.0)
                 return
 
-            # Maquina de estados del avoid (3 casos, tipo Practica 1):
+            # Maquina de estados del avoid (3 casos):
             if min_front < self.DIST_FRONTAL_OBST:
                 # CASO A: caja al frente -> girar derecha, sin avanzar
                 v_cmd, w_cmd, estado = 0.0, -1.0, 'AVOID-FRONT'
             elif min_left > self.AVOID_CORNER_LEFT:
                 # CASO B: izquierda despejada -> envolver con curva AMPLIA.
-                # Antes era v=0.08 w=1.3 (radio 6 cm) -> el robot picaba a la
-                # caja al rotar tan cerrado. Ahora v=0.12 w=0.8 (radio 15 cm),
-                # da una curva continua sobre la caja sin chocar.
-                v_cmd, w_cmd, estado = 0.12, 0.8, 'AVOID-CORNER'
+                # v=0.15, w=0.6 -> radio 25 cm. Curva mas abierta para
+                # alejarse mas del objeto al rotar (antes radio 15 cm).
+                v_cmd, w_cmd, estado = 0.15, 0.6, 'AVOID-CORNER'
             else:
-                # CASO C: bordeando la pared izquierda (caja) con P-control.
-                # Mantiene DIST_OBJETIVO_PARED (0.30 m) sobre la izquierda.
-                # Velocidad moderada (0.15) para dar tiempo a reaccionar.
+                # CASO C: bordeando la caja con P-control.
+                # Mantiene DIST_OBJETIVO_PARED (0.40 m) -> abierto del objeto.
                 w_cmd = _clamp(-self.AVOID_WALL_GAIN
                                * (self.DIST_OBJETIVO_PARED - min_left))
                 v_cmd, estado = 0.15, 'AVOID-WALL'
