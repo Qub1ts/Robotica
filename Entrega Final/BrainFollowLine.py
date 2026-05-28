@@ -18,15 +18,12 @@ RUTA_IMG_ORIGINAL   = os.path.join(_AQUI, 'imagen_original.png')
 RUTA_IMG_MARCADA    = os.path.join(_AQUI, 'imagen_marcada.png')
 RUTA_DATASET_MARCAS = os.path.join(_AQUI, 'marcas-capturasStage')
 CLASES_MARCAS = ('man', 'stairs', 'telephone', 'woman')
-CLASES_LDA = CLASES_MARCAS + ('flecha',)
-IDX_FLECHA = CLASES_LDA.index('flecha')
 
 _HSV_ROJO_LO1 = np.array([0,   100,  70], dtype=np.uint8)
 _HSV_ROJO_HI1 = np.array([12,  255, 255], dtype=np.uint8)
 _HSV_ROJO_LO2 = np.array([165, 100,  70], dtype=np.uint8)
 _HSV_ROJO_HI2 = np.array([179, 255, 255], dtype=np.uint8)
 _KERNEL_3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-_KERNEL_5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 _RX_MARCA = re.compile(r'^([a-z]+)[-_]\d+\.png$', re.IGNORECASE)
 
 
@@ -115,45 +112,14 @@ def segmentar_qda(clf, bgr):
     return m_lin, m_mar
 
 
-def _descriptor_silueta(sil_bin):
-    """Descriptor de forma: Hu + ratios + bordes/esquinas."""
-    hu = cv2.HuMoments(cv2.moments(sil_bin, binaryImage=True)).flatten()
-    log_hu = -np.sign(hu) * np.log10(np.abs(hu) + 1e-30)
-    cnts, _ = cv2.findContours(sil_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not cnts:
-        return None
-    cnt = max(cnts, key=cv2.contourArea)
-    area = cv2.contourArea(cnt)
-    perim = cv2.arcLength(cnt, True)
-    if perim <= 1 or area <= 1:
-        return None
-    _, _, bw, bh = cv2.boundingRect(cnt)
-    hull_area = cv2.contourArea(cv2.convexHull(cnt)) or 1.0
-    ratios = np.array([
-        bh / bw if bw else 0.0,
-        area / (bw * bh) if (bw and bh) else 0.0,
-        area / hull_area,
-        4.0 * math.pi * area / (perim * perim),
-    ], dtype=np.float32)
-
-    sil_n = cv2.resize(sil_bin, (100, 100), interpolation=cv2.INTER_NEAREST)
-    edges = cv2.Canny(sil_n, 50, 150)
-    densidad_borde = float(edges.sum() / 255.0) / 10000.0
-    lineas = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=15,
-                             minLineLength=12, maxLineGap=4)
-    n_lineas = float(len(lineas)) if lineas is not None else 0.0
-    harris = cv2.cornerHarris(sil_n.astype(np.float32), 3, 3, 0.04)
-    n_esquinas = float((harris > 0.01 * harris.max()).sum()) if harris.max() > 0 else 0.0
-    borde = np.array([densidad_borde, n_lineas / 20.0, n_esquinas / 100.0],
-                     dtype=np.float32)
-    return np.concatenate([log_hu, ratios, borde]).astype(np.float32)
-
-
-def _blob_principal_y_silueta(m_rojo, area_min=80):
-    if not m_rojo.any():
-        return None
-    n, lab, st, _ = cv2.connectedComponentsWithStats(m_rojo.astype(np.uint8),
-                                                     connectivity=8)
+def _silueta_y_descriptor(bgr, area_min=80):
+    """Extrae descriptor de forma de la mayor silueta roja."""
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    m = (cv2.inRange(hsv, _HSV_ROJO_LO1, _HSV_ROJO_HI1) |
+         cv2.inRange(hsv, _HSV_ROJO_LO2, _HSV_ROJO_HI2))
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN,  _KERNEL_3, iterations=1)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, _KERNEL_3, iterations=2)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
     if n <= 1:
         return None
     idx = int(np.argmax(st[1:, cv2.CC_STAT_AREA])) + 1
@@ -164,116 +130,54 @@ def _blob_principal_y_silueta(m_rojo, area_min=80):
     w = int(st[idx, cv2.CC_STAT_WIDTH])
     h = int(st[idx, cv2.CC_STAT_HEIGHT])
     sil = (lab[y:y+h, x:x+w] == idx).astype(np.uint8) * 255
-    return sil, (x, y, w, h)
 
-
-def _silueta_y_descriptor(bgr, area_min=80):
-    """Extrae descriptor de forma de la mayor silueta roja."""
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    m = (cv2.inRange(hsv, _HSV_ROJO_LO1, _HSV_ROJO_HI1) |
-         cv2.inRange(hsv, _HSV_ROJO_LO2, _HSV_ROJO_HI2))
-    m = cv2.morphologyEx(m, cv2.MORPH_OPEN,  _KERNEL_3, iterations=1)
-    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, _KERNEL_3, iterations=2)
-    out = _blob_principal_y_silueta(m, area_min)
-    if out is None:
-        return None
-    sil, bbox = out
-    desc = _descriptor_silueta(sil)
-    return (desc, bbox) if desc is not None else None
-
-
-def _augmentar_silueta(sil):
-    return [sil, cv2.erode(sil, _KERNEL_3, iterations=1),
-            cv2.dilate(sil, _KERNEL_3, iterations=1)]
-
-
-def _generar_flechas_sinteticas():
-    out = []
-    variantes = [(1.0, 1.0, 1.0), (1.5, 1.0, 1.0),
-                 (1.0, 1.4, 1.0), (1.8, 0.8, 0.7)]
-    for ang_deg in range(0, 360, 20):
-        for largo_s, ancho_h, ancho_s in variantes:
-            sz = 200
-            img = np.zeros((sz, sz), dtype=np.uint8)
-            cx, cy = sz // 2, sz // 2
-            shaft = np.array([
-                [-5 * ancho_s, 30 * largo_s],
-                [ 5 * ancho_s, 30 * largo_s],
-                [ 5 * ancho_s, -10],
-                [-5 * ancho_s, -10],
+    hu = cv2.HuMoments(cv2.moments(sil, binaryImage=True)).flatten()
+    log_hu = -np.sign(hu) * np.log10(np.abs(hu) + 1e-30)
+    cnts, _ = cv2.findContours(sil, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    ratios = np.zeros(4, dtype=np.float32)
+    if cnts:
+        cnt = max(cnts, key=cv2.contourArea)
+        area = cv2.contourArea(cnt)
+        perim = cv2.arcLength(cnt, True)
+        if perim > 1 and area > 1:
+            bx, by, bw, bh = cv2.boundingRect(cnt)
+            hull_area = cv2.contourArea(cv2.convexHull(cnt)) or 1.0
+            ratios = np.array([
+                bh / bw if bw else 0.0,
+                area / (bw * bh) if (bw and bh) else 0.0,
+                area / hull_area,
+                4 * math.pi * area / (perim * perim),
             ], dtype=np.float32)
-            head = np.array([
-                [-15 * ancho_h, -10],
-                [ 15 * ancho_h, -10],
-                [  0,           -30],
-            ], dtype=np.float32)
-            th = math.radians(-ang_deg)
-            R = np.array([[math.cos(th), -math.sin(th)],
-                          [math.sin(th),  math.cos(th)]])
-            cv2.fillPoly(img, [(shaft @ R.T + [cx, cy]).astype(np.int32)], 255)
-            cv2.fillPoly(img, [(head  @ R.T + [cx, cy]).astype(np.int32)], 255)
-            out.append(img)
-    return out
+    desc = np.concatenate([log_hu, ratios]).astype(np.float32)
+    return desc, (x, y, w, h)
 
 
 def entrenar_lda_marcas():
-    X, y = [], []
-    conteo = {c: 0 for c in CLASES_LDA}
+    X, y, rangos_raw = [], [], {c: [] for c in range(len(CLASES_MARCAS))}
     for f in sorted(glob.glob(os.path.join(RUTA_DATASET_MARCAS, '*.png'))):
         m = _RX_MARCA.match(os.path.basename(f))
         if not (m and m.group(1).lower() in CLASES_MARCAS):
             continue
-        bgr = cv2.imread(f)
-        if bgr is None:
+        out = _silueta_y_descriptor(cv2.imread(f))
+        if not out:
             continue
-        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-        m_rojo = (cv2.inRange(hsv, _HSV_ROJO_LO1, _HSV_ROJO_HI1) |
-                  cv2.inRange(hsv, _HSV_ROJO_LO2, _HSV_ROJO_HI2))
-        blob = _blob_principal_y_silueta(m_rojo, area_min=80)
-        if blob is None:
-            continue
-        sil, _ = blob
+        d, _ = out
         clase = CLASES_MARCAS.index(m.group(1).lower())
-        for sil_var in _augmentar_silueta(sil):
-            d = _descriptor_silueta(sil_var)
-            if d is None:
-                continue
-            X.append(d)
-            y.append(clase)
-            conteo[CLASES_MARCAS[clase]] += 1
-
-    for sil in _generar_flechas_sinteticas():
-        d = _descriptor_silueta(sil)
-        if d is None:
-            continue
         X.append(d)
-        y.append(IDX_FLECHA)
-        conteo['flecha'] += 1
-
-    X = np.stack(X)
-    y = np.array(y)
-    clf = LinearDiscriminantAnalysis(solver='svd').fit(X, y)
-    D = X.shape[1]
-    medias = np.zeros((len(CLASES_LDA), D), dtype=np.float32)
-    for c in range(len(CLASES_LDA)):
-        Xc = X[y == c]
-        if len(Xc):
-            medias[c] = Xc.mean(axis=0)
-    cov = np.cov(X.T) + 0.05 * np.eye(D)
-    print('LDA marcas:', conteo)
-    return {
-        'clf': clf,
-        'medias': medias,
-        'cov_inv': np.linalg.inv(cov).astype(np.float32),
-    }
+        y.append(clase)
+        rangos_raw[clase].append(d[7:11])
+    clf = LinearDiscriminantAnalysis(solver='svd').fit(np.stack(X), np.array(y))
+    rangos = {k: np.column_stack([np.stack(l).min(0) - 0.05,
+                                   np.stack(l).max(0) + 0.05])
+              for k, l in rangos_raw.items() if l}
+    return clf, rangos
 
 
-def predecir_marca(m_rojo, modelo, area_min=300, umbral_conf=0.80,
-                   maha_max=4.5, h_img=None, y_top_max_frac=0.05):
-    out = _blob_principal_y_silueta(m_rojo, area_min)
-    if out is None or modelo is None:
+def predecir_marca(bgr, clf, rangos, area_min=300, umbral_conf=0.55,
+                   usar_rangos=True):
+    out = _silueta_y_descriptor(bgr, area_min)
+    if not out:
         return None
-<<<<<<< Updated upstream
     feat, bbox = out
     if (bbox[1] + bbox[3]) >= (bgr.shape[0] - 5):
         return None
@@ -282,77 +186,20 @@ def predecir_marca(m_rojo, modelo, area_min=300, umbral_conf=0.80,
     # Bajado a 0.05 para que no filtre 'stairs'. Stairs tiene un perímetro
     # enorme por su forma en zig-zag, haciendo que su circularidad sea muy baja.
     if feat[10] < 0.05:
-=======
-    sil, bbox = out
-    if h_img is not None:
-        if (bbox[1] + bbox[3]) >= (h_img - 5):
-            return None
-        if bbox[1] < h_img * y_top_max_frac:
-            return None
-
-    feat = _descriptor_silueta(sil)
-    if feat is None:
->>>>>>> Stashed changes
         return None
 
-    clf = modelo['clf']
     probs = clf.predict_proba(feat.reshape(1, -1))[0]
     pred = int(np.argmax(probs))
     conf = float(probs[pred])
-    if conf < umbral_conf or pred == IDX_FLECHA:
+    if conf < umbral_conf:
         return None
-
-    diff = (feat - modelo['medias'][pred]).astype(np.float32)
-    maha = float(np.sqrt(max(0.0, diff @ modelo['cov_inv'] @ diff)))
-    if maha > maha_max:
-        return None
-    return CLASES_LDA[pred], conf, bbox
-
-
-class ConfirmadorFlecha:
-    def __init__(self, n_frames=2, tol_grados=35.0):
-        self.n_frames = n_frames
-        self.tol = tol_grados
-        self._ang = None
-        self._cnt = 0
-
-    def update(self, flecha):
-        if flecha is None:
-            self._ang = None
-            self._cnt = 0
-            return None
-        ang = flecha['angulo']
-        if self._ang is not None and abs((ang - self._ang + 180) % 360 - 180) < self.tol:
-            self._cnt += 1
-        else:
-            self._ang = ang
-            self._cnt = 1
-        return flecha if self._cnt >= self.n_frames else None
-
-
-class ConfirmadorMarca:
-    def __init__(self, ventana=5, min_votos=3):
-        self.ventana = ventana
-        self.min_votos = min_votos
-        self.historia = []
-
-    def update(self, marca):
-        self.historia.append(marca)
-        if len(self.historia) > self.ventana:
-            self.historia.pop(0)
-        votos = {}
-        for m in self.historia:
-            if m is not None:
-                votos[m[0]] = votos.get(m[0], 0) + 1
-        if not votos:
-            return None
-        clase = max(votos, key=votos.get)
-        if votos[clase] < self.min_votos:
-            return None
-        for m in reversed(self.historia):
-            if m is not None and m[0] == clase:
-                return m
-        return None
+    if usar_rangos:
+        rng = rangos.get(pred) if rangos else None
+        if rng is not None:
+            r = feat[7:11]
+            if np.any(r < rng[:, 0]) or np.any(r > rng[:, 1]):
+                return None
+    return CLASES_MARCAS[pred], conf, bbox
 
 
 class BrainFollowLine(Brain):
@@ -376,20 +223,13 @@ class BrainFollowLine(Brain):
     MARCA_AREA_MIN            = 450 # Bajado de 900 a 450 para captar marcas delgadas como 'stairs'
 
     # Filtros para que no confunda flechas con marcas
-<<<<<<< Updated upstream
     FLECHA_CIRC_MAX           = 0.45 
     FLECHA_ELONG_MIN          = 2.5  
     FLECHA_ASIM_MIN           = 0.30 
-=======
-    FLECHA_CIRC_MAX           = 0.50 # Medido en flechas reales: 0.26-0.47 aprox.
-    FLECHA_ELONG_MIN          = 2.0
-    FLECHA_ASIM_MIN           = 0.30 # subido: telephone/stairs son simetricos
-    FLECHA_SOLIDEZ_MIN        = 0.65
->>>>>>> Stashed changes
 
-    MARCA_UMBRAL_CONF_ALTO    = 0.80
-    MARCA_UMBRAL_CONF_BAJO    = 0.65
-    MARCA_MAHA_MAX            = 4.5
+    MARCA_UMBRAL_CONF_ALTO    = 0.55
+    MARCA_UMBRAL_CONF_BAJO    = 0.35
+    MARCA_FILTRO_RANGOS       = False
 
     MARCA_COOLDOWN, ARROW_TTL = 25, 300
 
@@ -410,9 +250,7 @@ class BrainFollowLine(Brain):
     def setup(self):
         print('Cargando modelos QDA y LDA...')
         self.clf_qda = entrenar_qda_linea()
-        self.modelo_marcas = entrenar_lda_marcas()
-        self.confirmador_flecha = ConfirmadorFlecha(n_frames=2, tol_grados=35.0)
-        self.confirmador_marca = ConfirmadorMarca(ventana=5, min_votos=3)
+        self.clf_lda, self.rangos_marcas = entrenar_lda_marcas()
         print('Listo. Todo preparado para la entrega final.')
 
         self.capture = cv2.VideoCapture(0)
@@ -498,8 +336,6 @@ class BrainFollowLine(Brain):
         
         perim = cv2.arcLength(cnt, True)
         if (4.0 * math.pi * area / max(perim * perim, 1e-6)) > self.FLECHA_CIRC_MAX: return None
-        hull_area = cv2.contourArea(cv2.convexHull(cnt)) or 1.0
-        if (area / hull_area) < self.FLECHA_SOLIDEZ_MIN: return None
 
         mask = np.zeros(m_rojo.shape, dtype=np.uint8)
         cv2.drawContours(mask, [cnt], -1, 255, -1)
@@ -570,32 +406,19 @@ class BrainFollowLine(Brain):
     def procesar_rojo(self, bgr, m_rojo):
         if not m_rojo.any(): return None, None
 
-        # Primero flecha: antes el LDA podia tragarse una flecha como
-        # "telephone" con conf=1.00 y el cruce se quedaba sin direccion.
-        flecha_cruda = self.detectar_flecha(m_rojo)
-        flecha_visual = self.confirmador_flecha.update(flecha_cruda)
-        if flecha_cruda is not None:
+        marca_alta = predecir_marca(bgr, self.clf_lda, self.rangos_marcas, area_min=self.MARCA_AREA_MIN, umbral_conf=self.MARCA_UMBRAL_CONF_ALTO, usar_rangos=self.MARCA_FILTRO_RANGOS)
+        if marca_alta is not None:
+            self._reportar_marca(marca_alta)
+            return marca_alta, None
+
+        flecha_visual = self.detectar_flecha(m_rojo)
+        if flecha_visual is not None:
             return None, flecha_visual
 
-        marca = predecir_marca(
-            m_rojo, self.modelo_marcas,
-            area_min=self.MARCA_AREA_MIN,
-            umbral_conf=self.MARCA_UMBRAL_CONF_ALTO,
-            maha_max=self.MARCA_MAHA_MAX,
-            h_img=bgr.shape[0],
-        )
-        if marca is None:
-            marca = predecir_marca(
-                m_rojo, self.modelo_marcas,
-                area_min=self.MARCA_AREA_MIN,
-                umbral_conf=self.MARCA_UMBRAL_CONF_BAJO,
-                maha_max=self.MARCA_MAHA_MAX,
-                h_img=bgr.shape[0],
-            )
-        marca_conf = self.confirmador_marca.update(marca)
-        if marca_conf is not None:
-            self._reportar_marca(marca_conf)
-        return marca_conf, None
+        marca_baja = predecir_marca(bgr, self.clf_lda, self.rangos_marcas, area_min=self.MARCA_AREA_MIN, umbral_conf=self.MARCA_UMBRAL_CONF_BAJO, usar_rangos=self.MARCA_FILTRO_RANGOS)
+        if marca_baja is not None:
+            self._reportar_marca(marca_baja)
+        return marca_baja, None
 
     def actualizar_memoria_flecha(self, flecha_visual):
         if flecha_visual:
