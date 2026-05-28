@@ -180,10 +180,10 @@ def predecir_marca(bgr, clf, rangos, area_min=300, umbral_conf=0.55,
         return None
     feat, bbox = out
     x, y, w, h = bbox
-
+    
     if x <= 5 or y <= 5 or (x + w) >= (bgr.shape[1] - 5) or (y + h) >= (bgr.shape[0] - 5):
         return None
-
+        
     # --- ESCUDO MUTUAMENTE EXCLUSIVO CORREGIDO ---
     if feat[10] < 0.05:
         return None
@@ -210,21 +210,21 @@ class BrainFollowLine(Brain):
     # ---- Velocidades y control de seguimiento ----
     SLOW_FORWARD, FULL_FORWARD = 0.08, 0.40
     KP                    = 1.2
-    CRUCE_KP              = 1.8
+    CRUCE_KP              = 1.8 
 
     # ---- Parametros de percepcion ----
     FRANJA_ERROR, BANDA_BORDE = 60, 6
     MIN_SEGMENTO, FUSION_GAP  = 12, 18
     JUNCTION_Y_FRAC           = 0.75
     JUNCTION_MIN_RUN          = 6
-    SIDE_EXIT_Y_FRAC          = 0.70
+    SIDE_EXIT_Y_FRAC          = 0.70 
 
     AREA_MIN_FLECHA           = 350
-    MARCA_AREA_MIN            = 450
+    MARCA_AREA_MIN            = 450 
 
-    FLECHA_CIRC_MAX           = 0.45
-    FLECHA_ELONG_MIN          = 2.5
-    FLECHA_ASIM_MIN           = 0.30
+    FLECHA_CIRC_MAX           = 0.45 
+    FLECHA_ELONG_MIN          = 2.5  
+    FLECHA_ASIM_MIN           = 0.30 
 
     MARCA_UMBRAL_CONF_ALTO    = 0.55
     MARCA_UMBRAL_CONF_BAJO    = 0.35
@@ -338,7 +338,7 @@ class BrainFollowLine(Brain):
         cnt = max(cnts, key=cv2.contourArea)
         area = cv2.contourArea(cnt)
         if area < self.AREA_MIN_FLECHA or len(cnt) < 5: return None
-
+        
         perim = cv2.arcLength(cnt, True)
         if (4.0 * math.pi * area / max(perim * perim, 1e-6)) > self.FLECHA_CIRC_MAX: return None
 
@@ -348,7 +348,7 @@ class BrainFollowLine(Brain):
         pts = np.column_stack([xs, ys]).astype(np.float32)
         cx, cy = float(pts[:, 0].mean()), float(pts[:, 1].mean())
         eigval, eigvec = np.linalg.eigh(np.cov(pts.T))
-
+        
         if math.sqrt(float(max(eigval)) / float(max(min(eigval), 1e-6))) < self.FLECHA_ELONG_MIN: return None
 
         eje  = eigvec[:, int(np.argmax(eigval))]
@@ -358,7 +358,7 @@ class BrainFollowLine(Brain):
         pmin, pmax = float(proy_a.min()), float(proy_a.max())
         L = pmax - pmin
         if L < 5: return None
-
+        
         franja = 0.25 * L
         pp_pos = proy_p[proy_a > pmax - franja]
         pp_neg = proy_p[proy_a < pmin + franja]
@@ -369,7 +369,7 @@ class BrainFollowLine(Brain):
 
         idx = int(np.argmax(proy_a)) if s_pos > s_neg else int(np.argmin(proy_a))
         px, py = float(pts[idx, 0]), float(pts[idx, 1])
-
+        
         return {
             'angulo': math.degrees(math.atan2(cy - py, px - cx)),
             'centro': (cx, cy), 'contorno': cnt, 'punta': (px, py),
@@ -381,20 +381,6 @@ class BrainFollowLine(Brain):
         if not flecha:
             return min(salidas, key=lambda e: abs((e['angulo'] - 90 + 180) % 360 - 180))
 
-        # Mapeo del angulo de la flecha a un LADO discreto.
-        # Convencion (atan2 estilo): 0=derecha, +90=arriba, +/-180=izquierda, -90=abajo
-        a = ((flecha['angulo'] + 180.0) % 360.0) - 180.0
-        if   abs(a) >= 135.0: lado_obj = 'izquierda'
-        elif abs(a) <=  45.0: lado_obj = 'derecha'
-        elif a > 0:           lado_obj = 'arriba'
-        else:                 lado_obj = 'abajo'
-
-        # 1) Si hay salida del lado exacto que indica la flecha, esa es.
-        mismo_lado = [e for e in salidas if e['lado'] == lado_obj]
-        if mismo_lado:
-            return min(mismo_lado, key=lambda e: abs((e['angulo'] - flecha['angulo'] + 180) % 360 - 180))
-
-        # 2) Fallback angular: la salida cuyo angulo este mas cerca al de la flecha
         return min(salidas, key=lambda e: abs((e['angulo'] - flecha['angulo'] + 180) % 360 - 180))
 
     def leer_distancias(self):
@@ -473,7 +459,7 @@ class BrainFollowLine(Brain):
         if self.post_avoid_grace != 0 or len(salidas) < 2: return False
         jy = self.junction_y(m_lin)
         if jy is not None and jy >= h_img * self.JUNCTION_Y_FRAC: return True
-
+        
         lim_y = h_img * self.SIDE_EXIT_Y_FRAC
         for salida in salidas:
             if salida['lado'] in ('izquierda', 'derecha') and salida['punto'][1] >= lim_y: return True
@@ -639,7 +625,7 @@ class BrainFollowLine(Brain):
             if abs(error) > 0.15: self.last_error = error
             d_err = 0.0 if self.prev_error is None else (error - self.prev_error)
             self.prev_error = error
-
+            
             w_cmd = _clamp(-(self.KP * error + 0.6 * d_err))
             v_cmd = max(self.SLOW_FORWARD, self.FULL_FORWARD * (1.0 - 0.8 * abs(w_cmd)))
             estado = ('FOLLOW (grace=%d)' % self.post_avoid_grace if self.post_avoid_grace else 'FOLLOW')
