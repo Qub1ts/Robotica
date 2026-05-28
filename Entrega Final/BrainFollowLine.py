@@ -181,10 +181,6 @@ def predecir_marca(bgr, clf, rangos, area_min=300, umbral_conf=0.55,
     feat, bbox = out
     x, y, w, h = bbox
     
-    # --- FILTRO DE BORDES (NUEVO) ---
-    # Rechaza cualquier figura que toque los bordes de la imagen.
-    # Una flecha cortada por el borde pierde su asimetría, burla el filtro
-    # geométrico y confunde a la red neuronal haciéndole creer que es una marca.
     if x <= 5 or y <= 5 or (x + w) >= (bgr.shape[1] - 5) or (y + h) >= (bgr.shape[0] - 5):
         return None
         
@@ -226,7 +222,6 @@ class BrainFollowLine(Brain):
     AREA_MIN_FLECHA           = 350
     MARCA_AREA_MIN            = 450 
 
-    # Filtros para que no confunda flechas con marcas
     FLECHA_CIRC_MAX           = 0.45 
     FLECHA_ELONG_MIN          = 2.5  
     FLECHA_ASIM_MIN           = 0.30 
@@ -240,16 +235,22 @@ class BrainFollowLine(Brain):
     # ---- Lock de la salida elegida en cruce ----
     CRUCE_LOCK_TICKS_MIN  = 30
 
-    # Umbrales de evasion
-    DIST_FRONTAL_OBST     = 0.35   
-    DIST_FRENTE_LIBRE     = 0.40   
-    DIST_OBJETIVO_PARED   = 0.35   
-    AVOID_TICKS_MIN       = 40
+    # ---- Parametros de evasion ----
+    DIST_FRONTAL_OBST     = 0.35
+    DIST_FRENTE_LIBRE     = 0.40
+    DIST_OBJETIVO_PARED   = 0.30   # mantiene 30 cm de la caja (no tan cerca)
+    AVOID_TICKS_MIN       = 80     # asegura rodear cajas largas
     AVOID_TICKS_MAX       = 250
-    AVOID_EXIT_ERR_MAX    = 0.50
     AVOID_FLAG            = 1.0
     POST_AVOID_GRACE      = 60
     PRINT_EVERY_N_FRAMES  = 15
+
+    # Umbrales laterales del sonar para detectar fin de pared / esquina
+    AVOID_CORNER_LEFT     = 0.55   # bajado: si min_left>0.55 -> esquina (no 0.60)
+    AVOID_EXIT_LEFT       = 0.55   # bajado: salida cuando lateral despejado
+
+    # Control proporcional lateral
+    AVOID_WALL_GAIN       = 2.5    # bajado: control suave para no oscilar
 
     def setup(self):
         print('Cargando modelos QDA y LDA...')
@@ -411,13 +412,10 @@ class BrainFollowLine(Brain):
         if not m_rojo.any(): return None, None
 
         # --- PRIORIDAD DE FLECHAS (NUEVO ORDEN) ---
-        # Primero evaluamos si es una flecha pura. Como sus reglas matemáticas 
-        # (asimetría, elongación) son deterministas y estrictas, no hay falsos positivos.
         flecha_visual = self.detectar_flecha(m_rojo)
         if flecha_visual is not None:
             return None, flecha_visual
 
-        # Si no pasó los filtros estrictos de la flecha, dejamos que la red LDA opine.
         marca_alta = predecir_marca(bgr, self.clf_lda, self.rangos_marcas, area_min=self.MARCA_AREA_MIN, umbral_conf=self.MARCA_UMBRAL_CONF_ALTO, usar_rangos=self.MARCA_FILTRO_RANGOS)
         if marca_alta is not None:
             self._reportar_marca(marca_alta)
@@ -560,25 +558,38 @@ class BrainFollowLine(Brain):
             self.avoid_ticks += 1
             found_line = (error is not None)
             timeout    = self.avoid_ticks > self.AVOID_TICKS_MAX
-            lateral_libre = min_left > 0.45 
+
+            # Condicion de salida: caja terminada (lateral libre)
+            # + frente libre + minimo de ticks + linea visible o timeout
+            lateral_libre = min_left > self.AVOID_EXIT_LEFT
 
             if (self.avoid_ticks > self.AVOID_TICKS_MIN
                     and min_front > self.DIST_FRENTE_LIBRE
                     and lateral_libre
                     and (found_line or timeout)):
                 self.avoiding   = False
-                self.last_error = self.AVOID_FLAG
+                self.last_error = self.AVOID_FLAG  # forzar giro derecha al buscar
                 self.prev_error = None
                 self.post_avoid_grace = self.POST_AVOID_GRACE
                 self.move(0.0, 0.0)
                 return
 
-            if min_front < self.DIST_FRONTAL_OBST: 
+            # Maquina de estados del avoid (3 casos, tipo Practica 1):
+            if min_front < self.DIST_FRONTAL_OBST:
+                # CASO A: caja al frente -> girar derecha, sin avanzar
                 v_cmd, w_cmd, estado = 0.0, -1.0, 'AVOID-FRONT'
-            elif min_left > 0.5: 
-                v_cmd, w_cmd, estado = 0.15, 0.8, 'AVOID-CORNER'
+            elif min_left > self.AVOID_CORNER_LEFT:
+                # CASO B: izquierda despejada -> envolver con curva AMPLIA.
+                # Antes era v=0.08 w=1.3 (radio 6 cm) -> el robot picaba a la
+                # caja al rotar tan cerrado. Ahora v=0.12 w=0.8 (radio 15 cm),
+                # da una curva continua sobre la caja sin chocar.
+                v_cmd, w_cmd, estado = 0.12, 0.8, 'AVOID-CORNER'
             else:
-                w_cmd = _clamp(-2.5 * (self.DIST_OBJETIVO_PARED - min_left))
+                # CASO C: bordeando la pared izquierda (caja) con P-control.
+                # Mantiene DIST_OBJETIVO_PARED (0.30 m) sobre la izquierda.
+                # Velocidad moderada (0.15) para dar tiempo a reaccionar.
+                w_cmd = _clamp(-self.AVOID_WALL_GAIN
+                               * (self.DIST_OBJETIVO_PARED - min_left))
                 v_cmd, estado = 0.15, 'AVOID-WALL'
 
         elif cruce_inminente and salida_elegida is not None:
@@ -592,8 +603,10 @@ class BrainFollowLine(Brain):
 
         elif error is None:
             self.prev_error = None
-            w_cmd = -0.8 if self.last_error > 0 else 0.8
-            v_cmd, estado = 0.0, 'BUSCAR (spin)'
+            # NUEVO (Retomar perfectamente): Trazar un arco hacia la línea, no solo pivotar.
+            # v_cmd (0.0 -> 0.1) y w_cmd fuerte para arco cerrado de aproximación suave.
+            w_cmd = -1.2 if self.last_error > 0 else 1.2
+            v_cmd, estado = 0.1, 'BUSCAR (arc)'
 
         else:
             if abs(error) > 0.15: self.last_error = error
