@@ -1,15 +1,3 @@
-"""BrainFollowLine.py - Cerebro final para el robot real (Pioneer + C920).
-
-Pipeline integrado:
-  - Segmentacion HSV (linea azul + zonas rojas/magenta).
-  - Deteccion de extremos del camino (ENT / S).
-  - Deteccion geometrica de FLECHA + memoria con TTL.
-  - Clasificacion de MARCAS (man/stairs/telephone/woman) con LDA.
-  - Eleccion de la salida del cruce segun la flecha + LOCK.
-  - Evasion frontal con sonar (3 estados: FRONT / CORNER / WALL).
-  - Seguimiento PD de la franja inferior + arco para reencontrar la linea.
-"""
-
 from pyrobot.brain import Brain
 
 import os
@@ -204,7 +192,7 @@ class BrainFollowLine(Brain):
     CAM_W, CAM_H = 640, 360
 
     # ---- Velocidades y PD ----
-    SLOW_FORWARD, FULL_FORWARD = 0.08, 0.40
+    SLOW_FORWARD, FULL_FORWARD = 0.08, 0.60
     KP                    = 1.2
     CRUCE_KP              = 1.8
 
