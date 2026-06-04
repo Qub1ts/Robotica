@@ -26,7 +26,7 @@ _KERNEL_5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 _HSV_AZUL_LO  = np.array([ 90,  60,  40], dtype=np.uint8)
 _HSV_AZUL_HI  = np.array([130, 255, 255], dtype=np.uint8)
 
-# --- HSV: rojo + magenta (flechas y marcas en el frame del robot) ---
+# --- HSV: rojo (flechas y marcas en el frame del robot) ---
 _HSV_ROJO_LO1 = np.array([  0,  80,  50], dtype=np.uint8)
 _HSV_ROJO_HI1 = np.array([ 12, 255, 255], dtype=np.uint8)
 _HSV_ROJO_LO2 = np.array([165,  80,  50], dtype=np.uint8)
@@ -46,10 +46,9 @@ def _clamp(valor, minimo=-1.0, maximo=1.0):
 
 
 # =====================================================================
-# SEGMENTACION HSV (linea azul + zonas rojas/magenta)
+# SEGMENTACION HSV (linea azul + zonas rojas)
 # =====================================================================
 def _filtrar_componentes(mask, area_min=80):
-    """Quita blobs con area menor a `area_min`. Devuelve mascara booleana."""
     mask = mask.astype(np.uint8)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     out = np.zeros_like(mask, dtype=np.uint8)
@@ -60,11 +59,6 @@ def _filtrar_componentes(mask, area_min=80):
 
 
 def segmentar_hsv(bgr):
-    """Devuelve (m_lin, m_rojo) booleanas a partir de un frame BGR.
-
-      m_lin  : linea azul del piso.
-      m_rojo : flechas y marcas rojas/magenta.
-    """
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
 
     m_lin = cv2.inRange(hsv, _HSV_AZUL_LO, _HSV_AZUL_HI)
@@ -86,8 +80,6 @@ def segmentar_hsv(bgr):
 # DESCRIPTOR DE FORMA + LDA DE MARCAS
 # =====================================================================
 def _silueta_y_descriptor(bgr, area_min=80):
-    """Extrae descriptor 11-D (7 log-Hu + 4 ratios) de la mayor silueta
-    roja del bgr. Devuelve (desc, bbox) o None."""
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     m = (cv2.inRange(hsv, _HSV_ROJO_MARCA_LO1, _HSV_ROJO_MARCA_HI1) |
          cv2.inRange(hsv, _HSV_ROJO_MARCA_LO2, _HSV_ROJO_MARCA_HI2))
@@ -129,7 +121,6 @@ def _silueta_y_descriptor(bgr, area_min=80):
 
 
 def entrenar_lda_marcas():
-    """Entrena LDA de 4 clases con los PNG de marcas-capturasStage/."""
     X, y = [], []
     rangos_raw = {c: [] for c in range(len(CLASES_MARCAS))}
     for f in sorted(glob.glob(os.path.join(RUTA_DATASET_MARCAS, '*.png'))):
@@ -295,12 +286,6 @@ class BrainFollowLine(Brain):
         return float((M['m10'] / M['m00'] - cx_img) / cx_img)
 
     def _linea_cerca(self, m_lin):
-        """True solo si hay linea en los ultimos 20 pixeles INFERIORES.
-
-        Se usa durante el avoid como condicion de salida: evita que el
-        robot abandone la maniobra al ver una linea LEJANA en la parte
-        alta de la imagen.
-        """
         return int(m_lin[-20:, :].sum()) > 200
 
     # =================================================================
@@ -427,7 +412,6 @@ class BrainFollowLine(Brain):
             self.cooldown_marca = self.MARCA_COOLDOWN
 
     def procesar_rojo(self, bgr, m_rojo):
-        """Cascada: flecha primero, luego marca alta, luego marca baja."""
         if not m_rojo.any():
             return None, None
 
