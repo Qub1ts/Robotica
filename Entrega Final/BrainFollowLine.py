@@ -10,23 +10,19 @@ import numpy as np
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 
 
-# =====================================================================
 # RUTAS Y CONSTANTES GLOBALES
-# =====================================================================
+
 _AQUI = os.path.dirname(os.path.abspath(__file__))
 RUTA_DATASET_MARCAS = os.path.join(_AQUI, 'marcas-capturasStage')
 CLASES_MARCAS = ('man', 'stairs', 'telephone', 'woman')
 _RX_MARCA = re.compile(r'^([a-z]+)[-_]\d+\.png$', re.IGNORECASE)
 
-# Kernels morfologicos (una sola instancia compartida).
 _KERNEL_3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 _KERNEL_5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
-# --- HSV: linea azul del piso real ---
 _HSV_AZUL_LO  = np.array([ 90,  60,  40], dtype=np.uint8)
 _HSV_AZUL_HI  = np.array([130, 255, 255], dtype=np.uint8)
 
-# --- HSV: rojo (flechas y marcas en el frame del robot) ---
 _HSV_ROJO_LO1 = np.array([  0,  80,  50], dtype=np.uint8)
 _HSV_ROJO_HI1 = np.array([ 12, 255, 255], dtype=np.uint8)
 _HSV_ROJO_LO2 = np.array([165,  80,  50], dtype=np.uint8)
@@ -34,7 +30,6 @@ _HSV_ROJO_HI2 = np.array([179, 255, 255], dtype=np.uint8)
 _HSV_MAG_LO   = np.array([130,  50,  40], dtype=np.uint8)
 _HSV_MAG_HI   = np.array([165, 255, 255], dtype=np.uint8)
 
-# --- HSV: rojo estricto (solo para el descriptor del LDA de marcas) ---
 _HSV_ROJO_MARCA_LO1 = np.array([  0, 100,  70], dtype=np.uint8)
 _HSV_ROJO_MARCA_HI1 = np.array([ 12, 255, 255], dtype=np.uint8)
 _HSV_ROJO_MARCA_LO2 = np.array([165, 100,  70], dtype=np.uint8)
@@ -45,9 +40,7 @@ def _clamp(valor, minimo=-1.0, maximo=1.0):
     return max(minimo, min(maximo, valor))
 
 
-# =====================================================================
-# SEGMENTACION HSV (linea azul + zonas rojas)
-# =====================================================================
+# SEGMENTACION HSV 
 def _filtrar_componentes(mask, area_min=80):
     mask = mask.astype(np.uint8)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
@@ -76,9 +69,7 @@ def segmentar_hsv(bgr):
     return m_lin, m_rojo
 
 
-# =====================================================================
 # DESCRIPTOR DE FORMA + LDA DE MARCAS
-# =====================================================================
 def _silueta_y_descriptor(bgr, area_min=80):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     m = (cv2.inRange(hsv, _HSV_ROJO_MARCA_LO1, _HSV_ROJO_MARCA_HI1) |
@@ -150,13 +141,11 @@ def predecir_marca(bgr, clf, rangos, area_min=300, umbral_conf=0.55,
     feat, bbox = out
     x, y, w, h = bbox
 
-    # Rechazo si el bbox toca cualquier borde (silueta probablemente cortada)
     if (x <= 5 or y <= 5
             or (x + w) >= (bgr.shape[1] - 5)
             or (y + h) >= (bgr.shape[0] - 5)):
         return None
 
-    # Escudo: figuras MUY alargadas son flechas, no marcas
     if feat[10] < 0.05:
         return None
 
@@ -174,15 +163,11 @@ def predecir_marca(bgr, clf, rangos, area_min=300, umbral_conf=0.55,
     return CLASES_MARCAS[pred], conf, bbox
 
 
-# =====================================================================
 # CEREBRO PRINCIPAL
-# =====================================================================
 class BrainFollowLine(Brain):
 
-    # ---- Camara real (C920) ----
     CAM_W, CAM_H = 640, 360
 
-    # ---- Velocidades y PD ----
     SLOW_FORWARD, FULL_FORWARD = 0.08, 0.60
     KP                    = 1.2
     CRUCE_KP              = 1.8
@@ -213,20 +198,18 @@ class BrainFollowLine(Brain):
     # ---- Evasion ----
     DIST_FRONTAL_OBST     = 0.35
     DIST_FRENTE_LIBRE     = 0.40
-    DIST_OBJETIVO_PARED   = 0.40   # 40 cm de margen lateral
+    DIST_OBJETIVO_PARED   = 0.40  
     AVOID_TICKS_MIN       = 80
     AVOID_TICKS_MAX       = 250
-    AVOID_FLAG            = -1.0   # negativo: tras salir, BUSCAR gira IZQ
+    AVOID_FLAG            = -1.0  
     POST_AVOID_GRACE      = 60
     PRINT_EVERY_N_FRAMES  = 15
 
-    AVOID_CORNER_LEFT     = 0.60   # despeje minimo para detectar esquina
-    AVOID_EXIT_LEFT       = 0.60   # despeje minimo para terminar el avoid
+    AVOID_CORNER_LEFT     = 0.60  
+    AVOID_EXIT_LEFT       = 0.60   
     AVOID_WALL_GAIN       = 2.5
 
-    # =================================================================
     # SETUP / DESTROY
-    # =================================================================
     def setup(self):
         print('Cargando LDA de marcas...')
         self.clf_lda, self.rangos_marcas = entrenar_lda_marcas()
@@ -263,9 +246,7 @@ class BrainFollowLine(Brain):
             self.capture.release()
         cv2.destroyAllWindows()
 
-    # =================================================================
     # SONAR Y TEMPORIZADORES
-    # =================================================================
     def leer_distancias(self):
         try:
             min_front = min(self.robot.range[i].distance() for i in range(2, 6))
@@ -288,9 +269,7 @@ class BrainFollowLine(Brain):
     def _linea_cerca(self, m_lin):
         return int(m_lin[-20:, :].sum()) > 200
 
-    # =================================================================
     # PERCEPCION: EXTREMOS, CRUCES Y FLECHA
-    # =================================================================
     def detectar_extremos(self, m_lin):
         h, w = m_lin.shape
         b, cx, cy = self.BANDA_BORDE, w / 2.0, h / 2.0
@@ -443,29 +422,23 @@ class BrainFollowLine(Brain):
             self.arrow_ttl_left -= 1
         return self.arrow_cache if self.arrow_ttl_left > 0 else None
 
-    # =================================================================
     # ELECCION DE SALIDA + LOCK
-    # =================================================================
     def elegir_salida(self, extremos, flecha):
         salidas = [e for e in extremos if not e['es_entrada']]
         if not salidas: return None
         if not flecha:
             return min(salidas, key=lambda e: abs((e['angulo'] - 90 + 180) % 360 - 180))
 
-        # Mapeo del angulo de la flecha a un LADO discreto.
-        # Convencion (atan2 estilo): 0=derecha, +90=arriba, +/-180=izquierda, -90=abajo
         a = ((flecha['angulo'] + 180.0) % 360.0) - 180.0
         if   abs(a) >= 135.0: lado_obj = 'izquierda'
         elif abs(a) <=  45.0: lado_obj = 'derecha'
         elif a > 0:           lado_obj = 'arriba'
         else:                 lado_obj = 'abajo'
 
-        # 1) Si hay salida del lado exacto que indica la flecha, esa es.
         mismo_lado = [e for e in salidas if e['lado'] == lado_obj]
         if mismo_lado:
             return min(mismo_lado, key=lambda e: abs((e['angulo'] - flecha['angulo'] + 180) % 360 - 180))
 
-        # 2) Fallback angular: la salida cuyo angulo este mas cerca al de la flecha
         return min(salidas, key=lambda e: abs((e['angulo'] - flecha['angulo'] + 180) % 360 - 180))
 
     def _actualizar_salida_lock(self, extremos):
@@ -479,9 +452,7 @@ class BrainFollowLine(Brain):
         return min(candidatos,
                    key=lambda e: abs(e['punto'][0] - lock['punto'][0]))
 
-    # =================================================================
-    # OVERLAY (GUI)
-    # =================================================================
+    # OVERLAY 
     def overlay(self, bgr, m_lin, m_rojo, ext, sel,
                 flecha, marca, err, v, w, estado):
         h, wi = bgr.shape[:2]
@@ -548,9 +519,7 @@ class BrainFollowLine(Brain):
             print("AVISO: no se puede mostrar ventana. Desactivo display.")
             self._gui_ok = False
 
-    # =================================================================
     # BUCLE PRINCIPAL
-    # =================================================================
     def step(self):
         ok, bgr = self.capture.read()
         if not ok or bgr is None:
@@ -612,8 +581,6 @@ class BrainFollowLine(Brain):
 
         if self.avoiding:
             self.avoid_ticks += 1
-            # found_line ESTRICTO: solo cuenta si la linea esta REALMENTE
-            # abajo (cerca del robot), no una lejana en la parte alta.
             found_line = self._linea_cerca(m_lin)
             timeout    = self.avoid_ticks > self.AVOID_TICKS_MAX
             lateral_libre = min_left > self.AVOID_EXIT_LEFT
@@ -623,7 +590,6 @@ class BrainFollowLine(Brain):
                     and lateral_libre
                     and (found_line or timeout)):
                 self.avoiding   = False
-                # AVOID_FLAG = -1.0 -> en BUSCAR girara IZQUIERDA
                 self.last_error = self.AVOID_FLAG
                 self.prev_error = None
                 self.post_avoid_grace = self.POST_AVOID_GRACE
@@ -654,13 +620,11 @@ class BrainFollowLine(Brain):
             estado = 'CRUCE -> ' + salida_elegida['lado']
 
         elif error is None:
-            # Sin linea -> arco para reencontrarla
             self.prev_error = None
             w_cmd = -1.2 if self.last_error > 0 else 1.2
             v_cmd, estado = 0.1, 'BUSCAR (arc)'
 
         else:
-            # Seguimiento PD normal
             if abs(error) > 0.15:
                 self.last_error = error
             d_err = 0.0 if self.prev_error is None else (error - self.prev_error)
